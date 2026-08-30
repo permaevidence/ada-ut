@@ -1,0 +1,13 @@
+# Optional: build/deploy with Clickable (https://clickable-ut.dev) instead of
+# scripts/build_click.py. The app is pure QML + Python, so both produce an
+# architecture-independent click.
+clickable_minimum_required: "8"
+builder: pure
+framework: ubuntu-touch-24.04-1.x
+kill: qmlscene
+ignore:
+  - scripts
+  - build
+  - README.md
+  - .git
+  - .gitignore

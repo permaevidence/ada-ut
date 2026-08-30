@@ -1,0 +1,15 @@
+{
+    "name": "ada.permaevidence",
+    "title": "Ada",
+    "version": "0.7.3",
+    "description": "Chat, installer & control panel for Ada CLI",
+    "architecture": "all",
+    "maintainer": "Matteo Ianni <iannimatte@gmail.com>",
+    "framework": "ubuntu-touch-24.04-1.x",
+    "hooks": {
+        "ada": {
+            "apparmor": "click/ada.apparmor",
+            "desktop": "click/ada.desktop"
+        }
+    }
+}

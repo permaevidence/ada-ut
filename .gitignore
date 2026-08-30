@@ -1,0 +1,19 @@
+build/
+*.click
+.clickable/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Never commit credentials, signing material, or exported user data.
+.env
+.env.*
+*.env
+secrets.json
+credentials.json
+auth.json
+*.key
+*.pem
+*_ed25519*
+*.minisig
+*.mind
