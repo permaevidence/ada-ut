@@ -10,7 +10,10 @@
 #                 TITLE, ASSETS (newline-separated file paths; the LAST one
 #                 must be the signed envelope manifest.sig.json)
 # Env (optional): GH_API_URL (default https://api.github.com),
-#                 GH_UPLOADS_URL (default https://uploads.github.com)
+#                 GH_UPLOADS_URL (default https://uploads.github.com),
+#                 TARGET_COMMITISH (exact commit the tag is created on;
+#                 without it GitHub would tag the default branch's CURRENT
+#                 head — callers publishing reviewed code must pass it)
 #
 # Exit 0 only when the release is CONFIRMED published (re-read from the API,
 # draft=false). An ambiguous PATCH is re-checked: live → success; still a
@@ -82,9 +85,11 @@ done
 # 3. Create the draft and address it by ID from here on (a draft cannot be
 #    resolved by tag).
 python3 -c 'import json,sys
-print(json.dumps({"tag_name": sys.argv[1], "draft": True, "name": sys.argv[2] + " " + sys.argv[3],
-  "body": "Signed release " + sys.argv[3] + ". Clients authenticate manifest.sig.json with the pinned Ed25519 key before trusting any asset."}))' \
-    "$REF_NAME" "$TITLE" "$VERSION" > "$WORK/create.json"
+req = {"tag_name": sys.argv[1], "draft": True, "name": sys.argv[2] + " " + sys.argv[3],
+  "body": "Signed release " + sys.argv[3] + ". Clients authenticate manifest.sig.json with the pinned Ed25519 key before trusting any asset."}
+if sys.argv[4]: req["target_commitish"] = sys.argv[4]
+print(json.dumps(req))' \
+    "$REF_NAME" "$TITLE" "$VERSION" "${TARGET_COMMITISH:-}" > "$WORK/create.json"
 api POST "$API/repos/$REPO/releases" -H "Content-Type: application/json" --data-binary @"$WORK/create.json"
 [ "$STATUS" = "201" ] || { echo "✖ creating the draft release failed (HTTP $STATUS)"; exit 1; }
 RELEASE_ID="$(jget "$BODY_FILE" id)"

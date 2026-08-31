@@ -47,7 +47,10 @@ class FakeGitHub:
         self.blob = {}
         self.hits = []
         self.faults = {}   # upload_fail: asset name; patch: "ambiguous"|"fail";
-        #                   download_substitute: name -> bytes; latest_override: bytes
+        #                   download_substitute: name -> bytes; latest_override: bytes;
+        #                   latest_queue: [bytes, ...] served in order (race simulation);
+        #                   blob_fail: blob pathname whose PUT fails
+        self.created = []  # create-release request bodies (target_commitish pinning)
         gh = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -75,6 +78,7 @@ class FakeGitHub:
             def _rel_json(self, r):
                 return {"id": r["id"], "tag_name": r["tag_name"], "draft": r["draft"],
                         "name": r["name"], "immutable": r["immutable"],
+                        "target_commitish": r.get("target_commitish"),
                         "assets": [{"name": n} for n in r["assets"]]}
 
             def do_GET(self):
@@ -99,6 +103,8 @@ class FakeGitHub:
                     items = [self._rel_json(r) for r in gh.releases.values()] if page == 1 else []
                     return self._json(200, items)
                 if path == "/latest/manifest.sig.json":
+                    if gh.faults.get("latest_queue"):
+                        return self._send(200, gh.faults["latest_queue"].pop(0))
                     if "latest_override" in gh.faults:
                         return self._send(200, gh.faults["latest_override"])
                     latest = gh.latest()
@@ -127,11 +133,12 @@ class FakeGitHub:
                 m = re.match(r"^/api/repos/([^/]+/[^/]+)/releases$", parsed.path)
                 if m:
                     req = json.loads(body)
+                    gh.created.append(req)
                     rid = gh.next_id
                     gh.next_id += 1
                     gh.releases[rid] = {"id": rid, "tag_name": req["tag_name"], "draft": bool(req.get("draft")),
                                         "name": req.get("name", ""), "immutable": False, "assets": {},
-                                        "order": []}
+                                        "order": [], "target_commitish": req.get("target_commitish")}
                     return self._json(201, self._rel_json(gh.releases[rid]))
                 m = re.match(r"^/api/repos/([^/]+/[^/]+)/releases/(\d+)/assets$", parsed.path)
                 if m:
@@ -174,7 +181,10 @@ class FakeGitHub:
                 body = self._body()
                 m = re.match(r"^/blob/(.+)$", self.path)
                 if m and self.headers.get("Authorization") == "Bearer b10b":
-                    gh.blob[urllib.parse.unquote(m.group(1))] = body
+                    pathname = urllib.parse.unquote(m.group(1))
+                    if gh.faults.get("blob_fail") == pathname:
+                        return self._json(500, {"message": "injected blob failure"})
+                    gh.blob[pathname] = body
                     return self._json(200, {"url": "ok"})
                 self._json(403, {})
 
@@ -213,7 +223,7 @@ def main():
     shutil.copy2(key.pub, os.path.join(repo, ".release-keys", "ada-ut-release.pub.pem"))
     rv_path = os.path.join(repo, "py", "release_verify.py")
 
-    def stamp(sequence, version, key_id=key.key_id, pub_hex=key.pub_hex):
+    def stamp(sequence, version, key_id=key.key_id, pub_hex=key.pub_hex, push=True):
         s = open(rv_path).read()
         s = re.sub(r"# STAMP-APP-KEY-BEGIN.*?# STAMP-APP-KEY-END",
                    '# STAMP-APP-KEY-BEGIN\nAPP_KEYS = {\n    "%s":\n        "%s",\n}\n# STAMP-APP-KEY-END'
@@ -226,7 +236,15 @@ def main():
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "stamp", "--allow-empty"],
                        cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        if push:
+            subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], cwd=repo, check=True, capture_output=True)
+
+    def head():
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    origin = os.path.join(root, "origin.git")
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", origin], cwd=repo, check=True)
     stamp(1, "0.7.4")
 
     gh = FakeGitHub()
@@ -238,7 +256,7 @@ def main():
         "LIVE_ENVELOPE_URL": gh.base + "/latest/manifest.sig.json",
         "SIGNING_KEY": key.priv, "PUBLICATION_LOG": log, "PUBLIC_RETRY_SLEEP": "0.05",
         "BLOB_API_URL": gh.base + "/blob", "BLOB_PUBLIC_PREFIX": gh.base + "/blobpub/app",
-        "BLOB_TOKEN": "b10b", "HOME": root,
+        "BLOB_TOKEN": "b10b", "HOME": root, "PUBLISH_LOCK": os.path.join(root, "publish.lock"),
     }
 
     def run(*args, **env):
@@ -306,6 +324,8 @@ def main():
               len(log_lines()) == 1 and json.loads(log_lines()[0])["sequence"] == 1)
         check("release PATCHed with explicit make_latest",
               any(h[0] == "PATCH" for h in gh.hits))
+        check("the tag is pinned to the exact reviewed HEAD commit",
+              gh.created and gh.created[-1].get("target_commitish") == head(), gh.created[-1:])
 
         print("— supersession —")
         rc, out = run()
@@ -329,8 +349,37 @@ def main():
               not ok and isinstance(replayed, rv.ReleaseVerifyError) and replayed.kind == "rollback", str(replayed))
         del gh.faults["latest_override"]
 
+        print("— concurrency —")
+        stamp(3, "0.7.6", push=False)
+        rc, out = run()
+        check("HEAD not on origin/main → refused before any build/network",
+              rc != 0 and "not on origin/main" in out and not gh.by_tag("v0.7.6"), out)
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], cwd=repo, check=True, capture_output=True)
+        import fcntl
+        lock_fd = os.open(base_env["PUBLISH_LOCK"], os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        rc, out = run()
+        check("a second publisher is refused while the lock is held",
+              rc != 0 and "publisher lock" in out and not gh.by_tag("v0.7.6"), out)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+        live_now = gh.latest()["assets"]["manifest.sig.json"]
+        # Race: the channel advances to sequence 9 between our first check
+        # (sees 2) and the pre-publish re-check (sees 9) → we must stop.
+        raced = key.sign(json.dumps({"channel": "ada-ut", "expires": "2099-01-01T00:00:00Z",
+                                     "platforms": {"click": {"sha256": "ab" * 32, "size": 1,
+                                                             "url": gh.base + "/download/v0.9.0/x.click"}},
+                                     "published": "2026-01-01T00:00:00Z", "schema": 1,
+                                     "sequence": 9, "version": "0.9.0"}, sort_keys=True, indent=2).encode())
+        gh.faults["latest_queue"] = [live_now, raced]
+        posts_before = len(posts())
+        rc, out = run()
+        check("channel advanced between the two checks → refused at 'before publish', nothing created",
+              rc != 0 and "superseded (before publish)" in out and len(posts()) == posts_before
+              and not gh.by_tag("v0.7.6"), out)
+        gh.faults.pop("latest_queue", None)
+
         print("— fault injection —")
-        stamp(3, "0.7.6")
         stale_id = gh.next_id
         gh.releases[stale_id] = {"id": stale_id, "tag_name": "v0.7.6", "draft": True, "name": "stale",
                                  "immutable": False, "assets": {}, "order": []}
@@ -401,11 +450,50 @@ def main():
               rc == 0 and gh.blob.get("app/ada.permaevidence_0.7.12_all.click") == click_built
               and legacy.get("version") == "0.7.12" and legacy.get("sha256") == hashlib.sha256(click_built).hexdigest()
               and legacy.get("size") == len(click_built) and legacy.get("filename") == "ada.permaevidence_0.7.12_all.click", out)
-        gh.blob["app/manifest.json"] = json.dumps({"version": "9.9.9"}).encode()
+        print("— legacy Blob recovery (--legacy-blob-only) —")
         stamp(10, "0.7.13")
+        gh.faults["blob_fail"] = "app/ada.permaevidence_0.7.13_all.click"
+        rc, out = run("--legacy-blob")
+        check("click Blob upload fails → GitHub live + recorded, exit 1 pointing at --legacy-blob-only, legacy manifest untouched",
+              rc != 0 and "--legacy-blob-only" in out and gh.latest()["tag_name"] == "v0.7.13"
+              and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.12"
+              and json.loads(log_lines()[-1])["version"] == "0.7.13", out)
+        del gh.faults["blob_fail"]
+        rc, out = run("--legacy-blob-only")
+        click_built = open(os.path.join(repo, "build", "ada.permaevidence_0.7.13_all.click"), "rb").read()
+        check("--legacy-blob-only republishes exactly the live click + manifest from the authenticated release",
+              rc == 0 and gh.blob.get("app/ada.permaevidence_0.7.13_all.click") == click_built
+              and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.13"
+              and json.loads(gh.blob["app/manifest.json"])["sha256"] == hashlib.sha256(click_built).hexdigest(), out)
+        writes_before = len([h for h in gh.hits if h[0] in ("POST", "PATCH", "DELETE")])
+        rc, out = run("--legacy-blob-only")
+        check("--legacy-blob-only is idempotent and never writes to GitHub",
+              rc == 0 and len([h for h in gh.hits if h[0] in ("POST", "PATCH", "DELETE")]) == writes_before
+              and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.13", out)
+        stamp(11, "0.7.14")
+        gh.faults["blob_fail"] = "app/manifest.json"
+        rc, out = run("--legacy-blob")
+        check("legacy manifest upload fails after the click → exit 1, recovery advised",
+              rc != 0 and "--legacy-blob-only" in out and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.13", out)
+        del gh.faults["blob_fail"]
+        rc, out = run("--legacy-blob-only")
+        check("recovery after a manifest-upload failure", rc == 0 and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.14", out)
+        gh.faults["download_substitute"] = {"ada.permaevidence_0.7.14_all.click": b"evil"}
+        rc, out = run("--legacy-blob-only")
+        check("--legacy-blob-only refuses a live click that does not match its signed hash",
+              rc != 0 and "does not match" in out, out)
+        del gh.faults["download_substitute"]
+        rc, out = run("--legacy-blob-only", "--bootstrap")
+        check("--legacy-blob-only rejects other mode flags", rc == 2, out)
+        gh.faults["latest_override"] = b"{}"
+        rc, out = run("--legacy-blob-only")
+        check("--legacy-blob-only with an unverifiable live envelope → hard stop", rc != 0 and "hard stop" in out, out)
+        del gh.faults["latest_override"]
+        gh.blob["app/manifest.json"] = json.dumps({"version": "9.9.9"}).encode()
+        stamp(12, "0.7.15")
         rc, out = run("--legacy-blob")
         check("newer legacy manifest live → GitHub publishes, Blob left alone",
-              rc == 0 and "left alone" in out and gh.latest()["tag_name"] == "v0.7.13"
+              rc == 0 and "left alone" in out and gh.latest()["tag_name"] == "v0.7.15"
               and json.loads(gh.blob["app/manifest.json"])["version"] == "9.9.9", out)
         check("every publication in the log is monotonic",
               [json.loads(l)["sequence"] for l in log_lines()] == sorted({json.loads(l)["sequence"] for l in log_lines()}),
