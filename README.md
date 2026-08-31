@@ -162,8 +162,16 @@ was retired on 2026-08-31.
 the pinned keys, cross-checks GitHub (recorded release, tag → commit,
 immutability, latest pointer), probes and periodically re-hashes every
 asset, checks the released installer and the website, and alerts over
-Telegram on any mismatch; `scripts/install_release_watch.sh` installs it as
-launchd agents on a Mac, `scripts/watch_selftest.py` is its battery.
+Telegram on any mismatch. Its state (the recorded per-channel rollback
+floor) is written durably with a last-known-good copy and automatic
+recovery. `scripts/release_heartbeat.py` is a separate, stdlib-only
+program with its own state and lock that alerts when the checker stops
+completing — it reads only the checker's completion beacon, never its
+code or state, so a broken checker cannot silence the report about it.
+`scripts/install_release_watch.sh` deploys both as launchd agents on a
+Mac atomically (stop → staged snapshot → foreground verification of
+checker then heartbeat → load, with rollback); `scripts/watch_selftest.py`
+is the battery for all three.
 
 Tests: `scripts/release_selftest.py` (verifier), `scripts/bridge_selftest.py`
 (signed install/update paths, rollback, tampering, fault injection) and

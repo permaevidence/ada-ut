@@ -489,19 +489,212 @@ def main():
         check("a concurrent run is refused while the lock is held", rc == 1 and "holds" in out, out)
         fcntl.flock(fd, fcntl.LOCK_UN); os.close(fd)
         fake.telegram.clear()
-        rc, out = run("heartbeat")
-        check("heartbeat with a fresh check → silent, exit 0", rc == 0 and not fake.telegram, out)
-        set_state(lambda st: st.__setitem__("last_completed", time.time() - 4 * 3600))
-        rc, out = run("heartbeat")
-        check("heartbeat with a stale check → alert, exit 2", rc == 2 and len(fake.telegram) == 1 and "has not completed" in fake.telegram[0], fake.telegram)
-        rc, out = run("heartbeat")
-        check("stale heartbeat is not re-sent within the window", len(fake.telegram) == 1, fake.telegram)
-        run("check"); fake.telegram.clear()
-        rc, out = run("heartbeat")
-        check("heartbeat recovery message once checks complete again", rc == 0 and len(fake.telegram) == 1 and fake.telegram[0].startswith("✅"), fake.telegram)
+
+        # ---------------------------------------------------------- heartbeat
+        print("— independent heartbeat (release_heartbeat.py) —")
+        heartbeat = os.path.join(repo, "scripts", "release_heartbeat.py")
+        beacon_path = os.path.join(state_dir, "check.beacon.json")
+        hb_state_path = os.path.join(state_dir, "heartbeat-state.json")
+
+        def hb(*extra, env=None, config=cfg_path):
+            p = subprocess.run([sys.executable, heartbeat, "--config", config, *extra],
+                               capture_output=True, text=True, env=env)
+            return p.returncode, p.stdout + p.stderr
+
+        def beacon():
+            return json.load(open(beacon_path))
+
+        def set_beacon(mut):
+            b = beacon(); mut(b); json.dump(b, open(beacon_path, "w"))
+
+        src = open(heartbeat).read()
+        imports = set()
+        for line in src.splitlines():
+            m = re.match(r"^(?:import|from)\s+([A-Za-z_][\w.]*)", line)
+            if m:
+                imports.add(m.group(1).split(".")[0])
+        check("heartbeat imports the standard library only", imports and imports <= set(sys.stdlib_module_names), sorted(imports))
+        check("heartbeat never imports the checker or the verifier module, nor extends sys.path",
+              not imports & {"release_watch", "release_verify"} and "sys.path" not in src and "__import__" not in src)
+        b = beacon()
+        check("check writes the completion beacon (completed ≈ now, 0 findings, 0 queued)",
+              abs(time.time() - b["completed"]) < 120 and b["findings"] == 0 and b["queued"] == 0 and b["oldest_queued"] is None, b)
+        rc, out = hb()
+        check("heartbeat with a fresh beacon → silent, exit 0", rc == 0 and not fake.telegram, out)
+        check("heartbeat keeps its own state file, separate from state.json", os.path.exists(hb_state_path), out)
+        fd = os.open(os.path.join(state_dir, "state.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        rc, out = hb()
+        check("heartbeat runs while the CHECKER's lock is held (does not share it)", rc == 0 and "holds" not in out, out)
+        fcntl.flock(fd, fcntl.LOCK_UN); os.close(fd)
+        # the verifier module disappears: the checker cannot import, the heartbeat must not care
+        py_dir = os.path.join(repo, "py")
+        os.rename(py_dir, py_dir + ".gone")
+        rc, out = run()
+        check("checker without py/release_verify.py fails to start (exit ≠ 0) and leaves the beacon untouched",
+              rc != 0 and beacon() == b, out[-300:])
+        rc, out = hb()
+        check("heartbeat still runs with the verifier module missing (fresh beacon → healthy)", rc == 0 and not fake.telegram, out)
+        set_beacon(lambda x: x.__setitem__("completed", time.time() - 4 * 3600))
+        rc, out = hb()
+        check("…and alerts once the beacon is older than the limit → exit 2", rc == 2 and len(fake.telegram) == 1 and "has not completed" in fake.telegram[0], fake.telegram)
+        rc, out = hb()
+        check("stale alert is not re-sent within the window", len(fake.telegram) == 1, fake.telegram)
+        os.rename(py_dir + ".gone", py_dir)
+        run(); fake.telegram.clear()
+        rc, out = hb()
+        check("recovery message once checks complete again", rc == 0 and len(fake.telegram) == 1 and fake.telegram[0].startswith("✅"), fake.telegram)
+        fake.telegram.clear()
+        os.unlink(beacon_path)
+        rc, out = hb()
+        check("no beacon at all → 'NEVER completed' alert", rc == 2 and any("NEVER" in m for m in fake.telegram), fake.telegram)
+        fake.telegram.clear()
+        open(beacon_path, "w").write("{not json")
+        rc, out = hb()
+        check("unreadable beacon → alert (different text, sent immediately)", rc == 2 and any("unreadable" in m for m in fake.telegram), fake.telegram)
+        fake.telegram.clear()
+        run(); hb(); fake.telegram.clear()
+        set_beacon(lambda x: (x.__setitem__("queued", 2), x.__setitem__("oldest_queued", time.time() - 4 * 3600)))
+        rc, out = hb()
+        check("checker reporting alerts undelivered for longer than the limit → heartbeat alerts", rc == 2 and any("undelivered" in m for m in fake.telegram), fake.telegram)
+        fake.telegram.clear()
+        run(); hb(); fake.telegram.clear()
+        set_beacon(lambda x: x.__setitem__("completed", time.time() - 4 * 3600))
+        open(hb_state_path, "w").write("garbage")
+        rc, out = hb()
+        check("heartbeat's OWN state corrupt → still alerts (with a note) and rebuilds its state",
+              rc == 2 and any("has not completed" in m and "own state" in m for m in fake.telegram) and json.load(open(hb_state_path))["active"], fake.telegram)
+        fake.telegram.clear()
+        run(); hb(); fake.telegram.clear()
+        fake_home = os.path.join(root, "fakehome"); os.makedirs(fake_home)
+        env = dict(os.environ, HOME=fake_home)
+        rc, out = hb(config=os.path.join(root, "missing-config.json"), env=env)
+        hb_default_state = os.path.join(fake_home, ".config", "ada-release-watch", "heartbeat-state.json")
+        check("missing config → built-in defaults, still tries to alert (no beacon there), never touches the real state dir",
+              rc == 2 and "built-in defaults" in out and os.path.exists(hb_default_state) and beacon()["findings"] == 0, out)
+        open(os.path.join(root, "bad-config.json"), "w").write("{oops")
+        rc, out = hb(config=os.path.join(root, "bad-config.json"), env=env)
+        check("corrupt config → same fallback", rc == 2 and "built-in defaults" in out, out)
+        set_beacon(lambda x: x.__setitem__("completed", time.time() - 4 * 3600))
+        fake.faults["tg_status"] = 500
+        rc, out = hb()
+        check("Telegram down at heartbeat time → alert queued in the heartbeat's own state", rc == 2 and json.load(open(hb_state_path))["queued"], out)
+        del fake.faults["tg_status"]
+        rc, out = hb()
+        check("queued heartbeat alert delivered on the next run", any("has not completed" in m for m in fake.telegram) and not json.load(open(hb_state_path))["queued"], fake.telegram)
+        run(); hb(); fake.telegram.clear()
+        rc, out = hb("--status")
+        check("heartbeat --status prints the beacon and its state", rc == 0 and '"completed"' in out and '"queued"' in out, out[-300:])
+
+        # ------------------------------------------------- state durability
+        print("— state durability and recovery —")
+        state_path = os.path.join(state_dir, "state.json")
+        prev_path = state_path + ".prev"
+        seq_now = state()["recorded"]["ada-cli"]["sequence"]   # 59 at this point in the battery
+        check("state.json.prev exists after saves and is a valid previous state", os.path.exists(prev_path) and json.load(open(prev_path))["recorded"]["ada-cli"]["sequence"] == seq_now)
+        check("state files are private (0600)", (os.stat(state_path).st_mode & 0o777) == 0o600 and (os.stat(prev_path).st_mode & 0o777) == 0o600)
+        good = open(state_path).read()
+        open(state_path, "w").write("{garbage")
+        rc, out = run()
+        st = state()
+        aside = [f for f in os.listdir(state_dir) if f.startswith("state.json.corrupt-")]
+        check("corrupt state.json → recovered from .prev, floor kept, damaged file kept aside, recovery ANNOUNCED",
+              rc == 0 and st["recorded"]["ada-cli"]["sequence"] == seq_now and aside
+              and any("recovered from the last-known-good" in m and "seq %d" % seq_now in m for m in fake.telegram), (out[-300:], fake.telegram))
+        fake.telegram.clear()
+        rc, out = run()
+        check("next run is silent again", rc == 0 and not fake.telegram, fake.telegram)
+        bad = json.loads(good); bad["recorded"]["ada-cli"]["sequence"] = "58"
+        json.dump(bad, open(state_path, "w"))
+        rc, out = run()
+        check("VALID JSON of the wrong shape (string sequence) is treated as corrupt → recovered, announced",
+              rc == 0 and isinstance(state()["recorded"]["ada-cli"]["sequence"], int) and any("recovered" in m for m in fake.telegram), fake.telegram)
+        fake.telegram.clear()
+        os.unlink(state_path)
+        rc, out = run()
+        check("state.json missing but .prev present (crash between renames) → recovered, announced",
+              rc == 0 and state()["recorded"]["ada-cli"]["sequence"] == seq_now and any("was missing" in m for m in fake.telegram), fake.telegram)
+        fake.telegram.clear()
+        b_before = beacon()
+        open(state_path, "w").write("{garbage"); open(prev_path, "w").write("{garbage")
+        rc, out = run()
+        check("BOTH state.json and .prev unusable → refuses to run (exit 1), direct 🚨 alert, files untouched, beacon untouched",
+              rc == 1 and any("REFUSING TO RUN" in m for m in fake.telegram) and open(state_path).read() == "{garbage"
+              and open(prev_path).read() == "{garbage" and beacon() == b_before, (out[-300:], fake.telegram))
+        fake.telegram.clear()
+        open(state_path, "w").write(good); os.unlink(prev_path)
+        run(); fake.telegram.clear()
         rc, out = run("status")
         check("status prints the state", rc == 0 and '"recorded"' in out, out[-200:])
         check("bot token never appears in output or state", "tok" not in out.replace("token", "") and "tok" not in json.dumps(state()).replace("token", ""))
+
+        # ------------------------------------------------- installer (macOS)
+        if sys.platform == "darwin":
+            print("— atomic, verified deployment (install_release_watch.sh with a launchctl shim) —")
+            ihome = os.path.join(root, "ihome")
+            iroot = os.path.join(ihome, ".config", "ada-release-watch")
+            os.makedirs(iroot, mode=0o700)
+            icfg = dict(cfg, state_dir=os.path.join(iroot, "state"))
+            json.dump(icfg, open(os.path.join(iroot, "config.json"), "w"))
+            shim_dir = os.path.join(root, "shim"); os.makedirs(shim_dir)
+            shim_log = os.path.join(root, "shim.log")
+            ibin = os.path.join(iroot, "bin")
+            open(os.path.join(shim_dir, "launchctl"), "w").write(
+                "#!/bin/bash\n"
+                "new=absent; [ -e '%s.new' ] && new=present\n"
+                "echo \"$1 $2 ${3:-} bin.new=$new\" >> '%s'\nexit 0\n" % (ibin, shim_log))
+            os.chmod(os.path.join(shim_dir, "launchctl"), 0o755)
+            ienv = dict(os.environ, PATH=shim_dir + os.pathsep + os.environ["PATH"], ADA_WATCH_HOME=ihome)
+            installer = os.path.join(repo, "scripts", "install_release_watch.sh")
+
+            def install():
+                p = subprocess.run(["bash", installer], capture_output=True, text=True, env=ienv)
+                return p.returncode, p.stdout + p.stderr
+
+            def shim_calls():
+                return [l.strip() for l in open(shim_log)] if os.path.exists(shim_log) else []
+
+            rc, out = install()
+            calls = shim_calls()
+            check("fresh install succeeds; snapshot has checker, heartbeat and verifier; no bin.new/bin.old left",
+                  rc == 0 and all(os.path.exists(os.path.join(ibin, f)) for f in ("release_watch.py", "release_heartbeat.py", "py/release_verify.py", "SNAPSHOT_COMMIT"))
+                  and not os.path.exists(ibin + ".new") and not os.path.exists(ibin + ".old"), out[-400:])
+            ops = []
+            for c in calls:
+                parts = c.split()
+                kind = re.search(r"\.(check|heartbeat)\.plist", parts[2]) if parts[0] == "bootstrap" else None
+                ops.append(parts[0] + (" " + kind.group(1) if kind else ""))
+            check("agents are unloaded first, then bootstrapped checker → heartbeat, sequentially",
+                  ops == ["bootout", "bootout", "bootstrap check", "print", "bootstrap heartbeat", "print"], calls)
+            check("every bootstrap happens after the snapshot swap (bin.new absent)", all("bin.new=absent" in c for c in calls if c.startswith("bootstrap")), calls)
+            check("both jobs were verified in the foreground before loading (beacon + heartbeat state present)",
+                  os.path.exists(os.path.join(icfg["state_dir"], "check.beacon.json")) and os.path.exists(os.path.join(icfg["state_dir"], "heartbeat-state.json")))
+            plists = {k: open(os.path.join(ihome, "Library", "LaunchAgents", "com.permaevidence.ada-release-watch.%s.plist" % k)).read() for k in ("check", "heartbeat")}
+            check("plists: no RunAtLoad, checker runs release_watch.py check, heartbeat runs release_heartbeat.py",
+                  all("<key>RunAtLoad</key><false/>" in p for p in plists.values())
+                  and "<string>%s/release_watch.py</string><string>check</string>" % ibin in plists["check"]
+                  and "<string>%s/release_heartbeat.py</string>" % ibin in plists["heartbeat"] and "release_watch" not in plists["heartbeat"], plists)
+            # refresh: the snapshot is replaced atomically, the old one goes away only on success
+            open(os.path.join(ibin, "MARKER"), "w").write("old snapshot")
+            os.unlink(shim_log)
+            rc, out = install()
+            check("refresh succeeds and drops the old snapshot", rc == 0 and not os.path.exists(os.path.join(ibin, "MARKER")) and not os.path.exists(ibin + ".old"), out[-300:])
+            # failure: make the checker unable to run (both state files corrupt) → rollback
+            open(os.path.join(ibin, "MARKER"), "w").write("old snapshot")
+            sp = os.path.join(icfg["state_dir"], "state.json")
+            good_i = open(sp).read()
+            open(sp, "w").write("{garbage"); open(sp + ".prev", "w").write("{garbage")
+            os.unlink(shim_log)
+            rc, out = install()
+            calls = shim_calls()
+            check("checker failing from the new snapshot → install exits 1, previous snapshot restored, failed one kept",
+                  rc == 1 and os.path.exists(os.path.join(ibin, "MARKER")) and os.path.exists(ibin + ".failed") and not os.path.exists(ibin + ".old"), out[-400:])
+            check("…and the previous agents are reloaded after the rollback",
+                  [c.split()[0] for c in calls] == ["bootout", "bootout", "bootstrap", "print", "bootstrap", "print"], calls)
+            open(sp, "w").write(good_i); os.unlink(sp + ".prev")
+            fake.telegram.clear()
+        else:
+            print("— installer checks skipped (macOS only) —")
     finally:
         fake.close()
         shutil.rmtree(root, ignore_errors=True)

@@ -8,9 +8,12 @@ silent. No LLM is involved: every judgement here is a byte, hash, number
 or string comparison against pinned keys and a locally recorded history.
 
     release_watch.py check      [--config PATH]   # hourly
-    release_watch.py heartbeat  [--config PATH]   # every few hours: alerts if
-                                                  # `check` has stopped completing
     release_watch.py status     [--config PATH]   # print the recorded state
+
+The watcher watching itself is a SEPARATE program, scripts/release_heartbeat.py
+(stdlib only, its own state and lock): it reads nothing from this module and
+nothing from state.json — only the completion beacon `check.beacon.json`
+that `check` writes atomically at the end of every completed run.
 
 Per channel, `check`:
   1. fetches `releases/latest/download/manifest.sig.json` (bounded) and
@@ -44,12 +47,18 @@ Per channel, `check`:
 Alert policy: a finding is sent when it first appears and re-sent every
 `realert_hours` while it persists; when it clears, one recovery message is
 sent. Undelivered Telegram messages are queued in the state file and
-retried on the next run. `heartbeat` alerts when the last completed `check`
-is older than `heartbeat_max_age_hours` (the watcher watching itself).
+retried on the next run.
 
 Config (JSON; the installer writes the production one): see DEFAULT_CONFIG.
 State: <state_dir>/state.json under an exclusive lock — the recorded
-authorized releases, alert bookkeeping, timestamps. Stdlib only.
+authorized releases (the per-channel rollback floor), alert bookkeeping,
+queued messages. It is security state, so it is written durably (tmp +
+fsync + rename + directory fsync) and every save first preserves the
+previous good copy as state.json.prev. On load, a missing/corrupt/
+malformed state.json is recovered from that copy (the damaged file is kept
+aside and the recovery is announced); if BOTH are unusable the check
+refuses to run with an empty memory — it sends one direct alert and exits
+1 instead, so the rollback floor is never silently discarded. Stdlib only.
 """
 
 import argparse
@@ -164,14 +173,71 @@ def semver_tuple(version):
 
 # ------------------------------------------------------------------ state
 
+class StateUnreadable(WatchError):
+    """Neither state.json nor state.json.prev is usable."""
+
+
+def _fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def validate_state(data):
+    """Raise ValueError unless `data` has the shape the watcher relies on.
+    Valid JSON of the wrong shape is as dangerous as garbage: a string
+    sequence would silently disable the rollback comparison."""
+    if not isinstance(data, dict):
+        raise ValueError("top level is not an object")
+    for key, typ in (("recorded", dict), ("full_hash_at", dict), ("active", dict),
+                     ("queued", list), ("announced", dict)):
+        if key in data and not isinstance(data[key], typ):
+            raise ValueError("%s is not a %s" % (key, typ.__name__))
+    for channel, rec in data.get("recorded", {}).items():
+        if not isinstance(rec, dict):
+            raise ValueError("recorded[%s] is not an object" % channel)
+        if not isinstance(rec.get("sequence"), int) or isinstance(rec.get("sequence"), bool) or rec["sequence"] < 0:
+            raise ValueError("recorded[%s].sequence is not a non-negative integer" % channel)
+        for k in ("tag", "version", "envelope_sha256"):
+            if not isinstance(rec.get(k), str) or not rec[k]:
+                raise ValueError("recorded[%s].%s missing" % (channel, k))
+        if not isinstance(rec.get("commit"), str) or not _SHA_RE.match(rec["commit"]):
+            raise ValueError("recorded[%s].commit is not a commit sha" % channel)
+        if not isinstance(rec.get("assets"), dict):
+            raise ValueError("recorded[%s].assets is not an object" % channel)
+    for ts in data.get("full_hash_at", {}).values():
+        if not isinstance(ts, (int, float)):
+            raise ValueError("full_hash_at holds a non-numeric timestamp")
+    if any(not isinstance(m, str) for m in data.get("queued", [])):
+        raise ValueError("queued holds a non-string entry")
+    for key, a in data.get("active", {}).items():
+        if not isinstance(a, dict) or not isinstance(a.get("first"), (int, float)) or not isinstance(a.get("last_sent"), (int, float)):
+            raise ValueError("active[%s] malformed" % key)
+
+
 class State:
+    """state.json under an exclusive lock, with durable writes and a
+    last-known-good copy. `recovered` is set when the load fell back to
+    state.json.prev so the run can announce it."""
+
     def __init__(self, state_dir):
         self.dir = os.path.expanduser(state_dir)
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         self.path = os.path.join(self.dir, "state.json")
+        self.prev_path = self.path + ".prev"
         self.lock_path = os.path.join(self.dir, "state.lock")
         self.lock_fd = None
         self.data = None
+        self.recovered = None
+
+    @staticmethod
+    def _load(path):
+        with open(path) as f:
+            data = json.load(f)
+        validate_state(data)
+        return data
 
     def __enter__(self):
         self.lock_fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -181,11 +247,38 @@ class State:
             os.close(self.lock_fd)
             self.lock_fd = None
             raise WatchError("another release_watch run holds %s" % self.lock_path)
-        if os.path.exists(self.path):
-            with open(self.path) as f:
-                self.data = json.load(f)   # a corrupt state file is a hard error, on purpose
-        else:
-            self.data = {}
+        try:
+            if os.path.exists(self.path):
+                try:
+                    self.data = self._load(self.path)
+                except Exception as exc:  # noqa: BLE001 — recover, do not crash silently
+                    primary = "%s: %s" % (type(exc).__name__, exc)
+                    if not os.path.exists(self.prev_path):
+                        raise StateUnreadable("state.json is unusable (%s) and no state.json.prev exists" % primary)
+                    try:
+                        self.data = self._load(self.prev_path)
+                    except Exception as exc2:  # noqa: BLE001
+                        raise StateUnreadable("state.json is unusable (%s) and so is state.json.prev (%s: %s)"
+                                              % (primary, type(exc2).__name__, exc2))
+                    aside = "%s.corrupt-%d" % (self.path, int(now_ts()))
+                    os.replace(self.path, aside)
+                    _fsync_dir(self.dir)
+                    self.recovered = ("state.json was unusable (%s); recovered from the last-known-good copy state.json.prev; "
+                                      "the damaged file is kept as %s" % (primary, os.path.basename(aside)))
+            elif os.path.exists(self.prev_path):
+                # a crash between the two renames in save() leaves only .prev
+                try:
+                    self.data = self._load(self.prev_path)
+                except Exception as exc:  # noqa: BLE001
+                    raise StateUnreadable("state.json is missing and state.json.prev is unusable (%s: %s)" % (type(exc).__name__, exc))
+                self.recovered = "state.json was missing; recovered from the last-known-good copy state.json.prev"
+            else:
+                self.data = {}
+        except BaseException:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+            os.close(self.lock_fd)
+            self.lock_fd = None
+            raise
         self.data.setdefault("version", WATCH_VERSION)
         self.data.setdefault("recorded", {})
         self.data.setdefault("full_hash_at", {})
@@ -195,12 +288,40 @@ class State:
         return self
 
     def save(self):
+        """Durable: the new file is fsynced before it is renamed into place,
+        the previous good file survives as state.json.prev, and the
+        directory is fsynced so the renames themselves reach the disk."""
+        validate_state(self.data)
         tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(self.data, f, indent=2, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())
+        if os.path.exists(self.path):
+            # hard-link, then rename over .prev: state.json stays present throughout
+            prev_tmp = self.prev_path + ".tmp"
+            if os.path.exists(prev_tmp):
+                os.unlink(prev_tmp)
+            os.link(self.path, prev_tmp)
+            os.replace(prev_tmp, self.prev_path)
+            _fsync_dir(self.dir)
         os.replace(tmp, self.path)
+        _fsync_dir(self.dir)
+
+    def write_beacon(self, now, findings, queued, oldest_queued):
+        """The completion beacon read by release_heartbeat.py — written only
+        after the state itself has been saved. Atomic, fsynced."""
+        path = os.path.join(self.dir, "check.beacon.json")
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"version": WATCH_VERSION, "completed": now, "findings": findings,
+                       "queued": queued, "oldest_queued": oldest_queued}, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        _fsync_dir(self.dir)
 
     def __exit__(self, *exc):
         if self.lock_fd is not None:
@@ -297,8 +418,6 @@ class Run:
                 messages.append("🚨 ada release watch — STILL FAILING since %s — %s\n%s"
                                 % (iso(prev["first"]), key, text))
         for key in list(active):
-            if key.startswith("watch/"):
-                continue   # owned by `heartbeat`, which reconciles it itself
             if key not in self.findings:
                 first = active.pop(key)["first"]
                 messages.append("✅ ada release watch — recovered: %s (failing since %s)" % (key, iso(first)))
@@ -310,6 +429,10 @@ class Run:
         for m in pending:
             if not send_telegram(cfg, m):
                 st["queued"].append(m)
+        if st["queued"]:
+            st.setdefault("queued_since", now)   # reported through the beacon to the heartbeat
+        else:
+            st.pop("queued_since", None)
         return messages
 
 
@@ -640,8 +763,23 @@ def load_config(path):
 
 def cmd_check(cfg):
     now = now_ts()
-    with State(cfg["state_dir"]) as state:
+    try:
+        state = State(cfg["state_dir"]).__enter__()
+    except StateUnreadable as exc:
+        # No memory to run with: an empty state would silently discard the
+        # rollback floor. Say so directly (no state needed to send) and stop;
+        # the beacon goes stale, so the heartbeat repeats the alarm too.
+        text = ("🚨 ada release watch — REFUSING TO RUN: %s. The recorded rollback floor and queued alerts "
+                "are not available; restore state.json from a backup or re-seed only after verifying the live "
+                "releases by hand (runbook §8)." % exc)
+        print("✖ %s" % exc)
+        send_telegram(cfg, text)
+        return 1
+    try:
         run = Run(cfg, state)
+        if state.recovered:
+            floor = ", ".join("%s seq %d" % (c, r["sequence"]) for c, r in sorted(state.data["recorded"].items())) or "none"
+            run.info("⚠️ %s — recorded floor kept: %s" % (state.recovered, floor))
         for channel in cfg["channels"]:
             try:
                 check_channel(cfg, channel, run, now)
@@ -653,40 +791,12 @@ def cmd_check(cfg):
         if not run.findings:
             state.data["last_clean"] = now
         state.save()
+        state.write_beacon(now, len(run.findings), len(state.data["queued"]), state.data.get("queued_since"))
+    finally:
+        state.__exit__(None, None, None)
     print("check complete: %d finding(s), %d message(s), %d queued"
           % (len(run.findings), len(messages), len(state.data["queued"])))
     return 2 if run.findings else 0
-
-
-def cmd_heartbeat(cfg):
-    now = now_ts()
-    max_age = float(cfg["heartbeat_max_age_hours"]) * 3600
-    with State(cfg["state_dir"]) as state:
-        st = state.data
-        last = st.get("last_completed")
-        stale = last is None or now - last > max_age
-        msg = None
-        if stale:
-            key = "watch/heartbeat"
-            prev = st["active"].get(key)
-            realert = float(cfg["realert_hours"]) * 3600
-            if prev is None or now - prev["last_sent"] >= realert:
-                st["active"][key] = {"first": (prev or {}).get("first", now), "last_sent": now, "text": "stale"}
-                msg = ("🚨 ada release watch — the hourly check has not completed since %s (limit %.0fh). "
-                       "The watcher itself may be broken or the Mac may be offline."
-                       % (iso(last) if last else "never", max_age / 3600))
-        else:
-            if st["active"].pop("watch/heartbeat", None):
-                msg = "✅ ada release watch — hourly checks are completing again (last %s)" % iso(last)
-        pending = list(st["queued"]) + ([msg] if msg else [])
-        st["queued"] = []
-        for m in pending:
-            if not send_telegram(cfg, m):
-                st["queued"].append(m)
-        st["last_heartbeat"] = now
-        state.save()
-    print("heartbeat: %s (last completed check: %s)" % ("STALE" if stale else "ok", iso(last) if last else "never"))
-    return 2 if stale else 0
 
 
 def cmd_status(cfg):
@@ -697,13 +807,13 @@ def cmd_status(cfg):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["check", "heartbeat", "status"])
+    ap.add_argument("command", choices=["check", "status"])
     ap.add_argument("--config", help="JSON config overriding DEFAULT_CONFIG")
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
     print("ada release watch v%s — %s — %s" % (WATCH_VERSION, args.command, iso(now_ts())))
     try:
-        return {"check": cmd_check, "heartbeat": cmd_heartbeat, "status": cmd_status}[args.command](cfg)
+        return {"check": cmd_check, "status": cmd_status}[args.command](cfg)
     except WatchError as exc:
         print("✖ %s" % exc)
         return 1
