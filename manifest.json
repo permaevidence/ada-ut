@@ -1,7 +1,7 @@
 {
     "name": "ada.permaevidence",
     "title": "Ada",
-    "version": "0.7.3",
+    "version": "0.7.4",
     "description": "Chat, installer & control panel for Ada CLI",
     "architecture": "all",
     "maintainer": "Matteo Ianni <iannimatte@gmail.com>",
