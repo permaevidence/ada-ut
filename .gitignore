@@ -17,3 +17,7 @@ auth.json
 *_ed25519*
 *.minisig
 *.mind
+
+# The committed EXPECTED public key for this app's release envelope (public
+# half only; the private key lives outside every working tree).
+!.release-keys/*.pub.pem

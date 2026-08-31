@@ -412,6 +412,24 @@ Item {
                 running: page.updateWorking
                 visible: running
             }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                textSize: Label.Small
+                color: theme.palette.normal.backgroundSecondaryText
+                // Which Ed25519 verifier this phone uses for the signed
+                // release channels (release_verify.provider_status()).
+                text: {
+                    var info = page.app.detectInfo;
+                    var v = info ? info.release_verifier : null;
+                    if (!v)
+                        return i18n.tr("Updates are signed (Ed25519) and verified on this phone before installing.");
+                    if (v.ok !== true)
+                        return i18n.tr("Signed updates cannot be verified on this phone: %1").arg(v.error);
+                    var who = v.provider === "openssl" ? "OpenSSL (" + v.path + ")" : i18n.tr("built-in verifier");
+                    return i18n.tr("Updates are signed (Ed25519) and verified on this phone by %1.").arg(who);
+                }
+            }
             Button {
                 Layout.fillWidth: true
                 enabled: !page.updateWorking

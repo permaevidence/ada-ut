@@ -15,9 +15,13 @@ The Ada Companion app for Ubuntu Touch is an unconfined installer and
 control panel for Ada CLI; it runs with the permissions of the user who
 installs it, by design. Reports we consider in scope include:
 
-- The install/update chain: manifest or checksum bypasses, downgrade
+- The install/update chain: release-signature verification bypasses
+  (envelope, key pinning, domain separation, the Ed25519 verifiers),
+  anti-rollback or expiry bypasses, size/hash bound bypasses, downgrade
   acceptance, transactional-install recovery flaws that could activate
   unverified binaries.
+- The click publisher (`scripts/publish_click.sh`): any path that could
+  publish or record an unverified or superseded release.
 - QR onboarding: crafted QR bundles that inject unintended configuration
   or exfiltrate scanned secrets; secrets persisting in frames, logs, or
   diagnostics.

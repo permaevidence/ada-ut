@@ -103,13 +103,58 @@ Any one of:
 
 3. `clickable install` from a Clickable checkout.
 
-4. Public download page: https://ada-app-psi.vercel.app/app — serves the
-   latest published click.
+4. Public download page: https://ada-app-psi.vercel.app/app — links the
+   latest signed GitHub Release (the page verifies the release envelope
+   with the pinned app key before it shows a download link).
 
 Once installed, the app updates itself: Settings has a manual "check for
-updates" action and an optional auto-update toggle (off by default). The
-updater verifies the manifest's version, size, and SHA-256 before
-installing via the system Click installer.
+updates" action and an optional auto-update toggle (off by default).
+
+## Signed releases
+
+Everything this app downloads is authenticated before a byte of it is
+trusted (`py/release_verify.py`):
+
+- **Ada CLI installs/updates** read the CLI's signed release envelope from
+  `github.com/permaevidence/ada-cli/releases/latest/download/manifest.sig.json`
+  and verify it with the pinned CLI release key — so a phone first-install
+  is authenticated, not merely TLS-protected.
+- **App self-updates** read this repository's own signed envelope
+  (`releases/latest/download/manifest.sig.json`) and verify it with the
+  pinned app key (`.release-keys/ada-ut-release.pub.pem`).
+
+Both channels enforce: exact Ed25519 signature over a domain-separated
+input, schema/channel/SemVer/expiry/not-before checks, assets restricted
+to the pinned per-version GitHub location, authenticated size + SHA-256
+while streaming (no Content-Length trust), a hard byte bound, and
+anti-rollback: the sequence must be ≥ the minimum baked into this build
+and ≥ the highest sequence this phone ever accepted for the same channel
+and location (`~/.config/ada-ut/release_trust.json`, locked, monotonic).
+
+Ed25519 on the phone: a system OpenSSL proven against the RFC 8032
+known-answer vectors is used when present; otherwise a dependency-free
+verify-only implementation (also proven against the vectors, and
+cross-checked against OpenSSL in `scripts/release_selftest.py`). Settings
+shows which one this phone uses. There are deliberately no environment
+overrides for keys, URLs or the verifier.
+
+Publishing (maintainers): `scripts/publish_click.sh` builds the click
+deterministically, checks supersession against the authenticated live
+release, signs with the local app key (`~/.ada-release-keys/`, mode 0600,
+never on argv), verifies the envelope with the committed public key AND
+with the app's own verifier, publishes an immutable GitHub Release (assets,
+envelope last, atomic go-live), re-downloads and byte-compares the public
+state, and only then records the publication. `--dry-run` stops before
+publishing; `--bootstrap` is accepted once, for the first signed release;
+`--legacy-blob` additionally refreshes the pre-signature Blob layout during
+the transition window so app versions ≤ 0.7.3 can make their last
+unsigned hop. Every release bumps `APP_RELEASE_SEQUENCE` in
+`py/release_verify.py` together with `manifest.json`'s version.
+
+Tests: `scripts/release_selftest.py` (verifier), `scripts/bridge_selftest.py`
+(signed install/update paths, rollback, tampering, fault injection) and
+`scripts/publish_selftest.py` (the publisher against a fake GitHub
+Releases API with injected faults).
 
 ## Device assumptions
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Offline selftest for py/ada_bridge.py's install pipeline.
 
-Runs on any POSIX dev box (no device, no network): serves a fake release
-from a file:// BASE_URL, with a fake `ada` shell script that answers
---version, bundle-check and setup-api status. Covers the Codex findings of
+Runs on any POSIX dev box (no device, no network): serves a fake SIGNED
+release channel (throwaway Ed25519 keys made through scripts/release/, the
+production signing scripts) from file:// URLs, with a fake `ada` shell
+script that answers --version, bundle-check and setup-api status. Covers the Codex findings of
 2026-08-27: staged setup-api/schema validation BEFORE mutation, the
 transactional swap with rollback (fault-injected), checksum failure, and
 unsafe-archive rejection.
@@ -13,6 +14,7 @@ Usage: python3 scripts/bridge_selftest.py
 
 import hashlib
 import io
+import itertools
 import json
 import os
 import shutil
@@ -23,6 +25,37 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "py"))
 import ada_bridge  # noqa: E402
+import release_verify  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from signing_fixture import TestKey, manifest_bytes  # noqa: E402
+
+CLI_KEY = APP_KEY = None            # created in main()
+_SEQ = itertools.count(100)         # every fixture publish supersedes the last
+LAST_SEQUENCE = {"cli": None, "app": None}
+
+
+def cli_policy(cdn_dir, min_sequence=1):
+    return release_verify.ReleasePolicy(
+        "ada-cli", CLI_KEY.keys(), "file://" + cdn_dir + "/manifest.sig.json",
+        "file://" + cdn_dir + "/v{version}/", min_sequence)
+
+
+def app_policy(cdn_dir, min_sequence=1):
+    return release_verify.ReleasePolicy(
+        "ada-ut", APP_KEY.keys(), "file://" + cdn_dir + "/manifest.sig.json",
+        "file://" + cdn_dir + "/v{version}/", min_sequence)
+
+
+def publish_manifest(cdn_dir, version, digest, size, sequence=None,
+                     asset="ada-test.tar.gz"):
+    """Sign + publish the channel manifest for one fixture release."""
+    sequence = next(_SEQ) if sequence is None else sequence
+    LAST_SEQUENCE["cli"] = sequence
+    platforms = {"test-plat": {"url": "file://%s/v%s/%s" % (cdn_dir, version, asset),
+                               "sha256": digest, "size": size}}
+    with open(os.path.join(cdn_dir, "manifest.sig.json"), "wb") as f:
+        f.write(CLI_KEY.sign(manifest_bytes("ada-cli", version, sequence, platforms)))
+    return sequence
 
 PASSED = FAILED = 0
 
@@ -55,8 +88,10 @@ esac
 """
 
 
-def publish_release(cdn_dir, version, ada_script, bundle_marker="bundle-v1"):
-    """Write manifest + tarball for the test platform into cdn_dir."""
+def publish_release(cdn_dir, version, ada_script, bundle_marker="bundle-v1",
+                    sequence=None, sha256=None):
+    """Write the tarball for the test platform under cdn_dir/v<version>/
+    and publish a SIGNED manifest for it (sha256 override = a signed lie)."""
     stage = tempfile.mkdtemp(prefix="ada-ut-fake-release-")
     try:
         ada_path = os.path.join(stage, "ada")
@@ -67,15 +102,14 @@ def publish_release(cdn_dir, version, ada_script, bundle_marker="bundle-v1"):
         os.makedirs(bundle)
         with open(os.path.join(bundle, "marker.txt"), "w") as f:
             f.write(bundle_marker)
-        tar_path = os.path.join(cdn_dir, "ada-test.tar.gz")
+        os.makedirs(os.path.join(cdn_dir, "v" + version), exist_ok=True)
+        tar_path = os.path.join(cdn_dir, "v" + version, "ada-test.tar.gz")
         with tarfile.open(tar_path, "w:gz") as tar:
             tar.add(ada_path, arcname="ada")
             tar.add(bundle, arcname=ada_bridge.BUNDLE_NAME)
         digest = hashlib.sha256(open(tar_path, "rb").read()).hexdigest()
-        manifest = {"version": version, "platforms": {"test-plat": {
-            "url": "file://" + tar_path, "sha256": digest}}}
-        with open(os.path.join(cdn_dir, "manifest.json"), "w") as f:
-            json.dump(manifest, f)
+        publish_manifest(cdn_dir, version, sha256 or digest,
+                         os.path.getsize(tar_path), sequence=sequence)
         return digest
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -93,8 +127,13 @@ def main():
     os.makedirs(cdn)
     os.makedirs(install_dir)
 
-    # Point the bridge at the fixture world.
-    ada_bridge.BASE_URL = "file://" + cdn
+    # Point the bridge at the fixture world: a signed channel with
+    # throwaway keys, and a private anti-rollback store.
+    global CLI_KEY, APP_KEY
+    CLI_KEY = TestKey("ada-cli")
+    APP_KEY = TestKey("ada-ut")
+    release_verify.TRUST_FILE = os.path.join(root, "trust", "release_trust.json")
+    release_verify.CLI_POLICY = cli_policy(cdn)
     ada_bridge.INSTALL_DIR = install_dir
     ada_bridge.ADA = os.path.join(install_dir, "ada")
     ada_bridge._platform_key = lambda: "test-plat"
@@ -118,10 +157,10 @@ def main():
               str(names))
 
         # 1. Fresh install, happy path.
-        publish_release(cdn, "9.9.9-test", FAKE_ADA_OK)
+        publish_release(cdn, "9.9.9", FAKE_ADA_OK)
         result = ada_bridge.install()
         check("fresh install succeeds", result["ok"] is True
-              and result["version"] == "9.9.9-test", str(result))
+              and result["version"] == "9.9.9", str(result))
         check("binary + bundle live, no leftovers",
               os.access(ada_bridge.ADA, os.X_OK)
               and read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v1"
@@ -132,17 +171,49 @@ def main():
               and not os.path.exists(os.path.join(install_dir, ".ada-install-journal.json.tmp")))
 
         # 2. Update replaces both components.
-        publish_release(cdn, "9.9.10-test", FAKE_ADA_OK, bundle_marker="bundle-v2")
+        publish_release(cdn, "9.9.10", FAKE_ADA_OK, bundle_marker="bundle-v2")
         result = ada_bridge.install()
         check("update succeeds", result["ok"] is True
-              and result["version"] == "9.9.10-test", str(result))
+              and result["version"] == "9.9.10", str(result))
         check("update replaced binary and bundle",
-              "9.9.10-test" in read(ada_bridge.ADA)
+              "9.9.10" in read(ada_bridge.ADA)
               and read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v2")
+        floor_after_update = LAST_SEQUENCE["cli"]
+        check("signed channel: accepted sequence recorded as the floor",
+              result.get("sequence") == floor_after_update
+              and release_verify.trust_floor(
+                  release_verify.CLI_POLICY.trust_domain)[0] == floor_after_update,
+              str(result))
+
+        # 2b. Signed channel: rollback and tampering are refused BEFORE any
+        # download, and touch nothing.
+        before_binary = read(ada_bridge.ADA)
+        publish_release(cdn, "9.9.10", FAKE_ADA_OK, bundle_marker="bundle-rb",
+                        sequence=floor_after_update - 1)
+        result = ada_bridge.install()
+        check("signed channel: older sequence than the floor refused (rollback)",
+              result["ok"] is False and "rollback" in (result["error"] or "")
+              and read(ada_bridge.ADA) == before_binary
+              and read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v2", str(result))
+        publish_release(cdn, "9.9.10", FAKE_ADA_OK, bundle_marker="bundle-tamper")
+        env_path = os.path.join(cdn, "manifest.sig.json")
+        envelope = json.load(open(env_path))
+        envelope["signature"] = ("B" if envelope["signature"][0] != "B" else "C") + envelope["signature"][1:]
+        json.dump(envelope, open(env_path, "w"))
+        result = ada_bridge.install()
+        check("signed channel: tampered envelope refused (bad-signature)",
+              result["ok"] is False and "bad-signature" in (result["error"] or "")
+              and read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v2", str(result))
+        publish_release(cdn, "9.9.10", FAKE_ADA_OK, bundle_marker="bundle-min")
+        release_verify.CLI_POLICY = cli_policy(cdn, min_sequence=LAST_SEQUENCE["cli"] + 1)
+        result = ada_bridge.install()
+        check("signed channel: below the app's embedded minimum refused",
+              result["ok"] is False and "rollback" in (result["error"] or ""), str(result))
+        release_verify.CLI_POLICY = cli_policy(cdn)
 
         # 3. Incompatible (pre-setup-api) release: rejected BEFORE mutation.
         before_binary = read(ada_bridge.ADA)
-        publish_release(cdn, "0.1.42-old", FAKE_ADA_PRE_SETUP_API)
+        publish_release(cdn, "0.1.42", FAKE_ADA_PRE_SETUP_API)
         result = ada_bridge.install()
         check("pre-setup-api release refused with a clear reason",
               result["ok"] is False and "predates" in (result["error"] or ""),
@@ -152,10 +223,7 @@ def main():
               and read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v2")
 
         # 4. Checksum mismatch: rejected, nothing touched.
-        publish_release(cdn, "9.9.11-test", FAKE_ADA_OK)
-        manifest = json.load(open(os.path.join(cdn, "manifest.json")))
-        manifest["platforms"]["test-plat"]["sha256"] = "0" * 64
-        json.dump(manifest, open(os.path.join(cdn, "manifest.json"), "w"))
+        publish_release(cdn, "9.9.11", FAKE_ADA_OK, sha256="0" * 64)
         result = ada_bridge.install()
         check("checksum mismatch refused",
               result["ok"] is False and "checksum" in (result["error"] or ""))
@@ -164,15 +232,14 @@ def main():
 
         # 5. Unsafe archive (path traversal member): rejected by the data
         # filter / guards, nothing touched.
-        tar_path = os.path.join(cdn, "ada-test.tar.gz")
+        tar_path = os.path.join(cdn, "v9.9.11", "ada-test.tar.gz")
         with tarfile.open(tar_path, "w:gz") as tar:
             info = tarfile.TarInfo("../evil.sh")
             payload = b"#!/bin/sh\n"
             info.size = len(payload)
             tar.addfile(info, io.BytesIO(payload))
         digest = hashlib.sha256(open(tar_path, "rb").read()).hexdigest()
-        manifest["platforms"]["test-plat"]["sha256"] = digest
-        json.dump(manifest, open(os.path.join(cdn, "manifest.json"), "w"))
+        publish_manifest(cdn, "9.9.11", digest, os.path.getsize(tar_path))
         result = ada_bridge.install()
         check("traversal member refused",
               result["ok"] is False and read(ada_bridge.ADA) == before_binary,
@@ -181,7 +248,7 @@ def main():
         # 6. Fault injection mid-swap: bundle rename fails after the binary
         # already swapped — EVERYTHING must roll back (Codex's reproduction:
         # the old code left a new binary with a missing bundle).
-        publish_release(cdn, "9.9.12-test", FAKE_ADA_OK, bundle_marker="bundle-v3")
+        publish_release(cdn, "9.9.12", FAKE_ADA_OK, bundle_marker="bundle-v3")
         real_rename = os.replace
 
         def failing_rename(src, dst):
@@ -202,12 +269,12 @@ def main():
               and not os.path.exists(bundle_dest + ".new")
               and not os.path.exists(bundle_dest + ".old"))
         code, out, _ = ada_bridge._run([ada_bridge.ADA, "--version"])
-        check("restored binary still runs", code == 0 and "9.9.10-test" in out)
+        check("restored binary still runs", code == 0 and "9.9.10" in out)
 
         # 7. Recovery: the next install after a failure succeeds cleanly.
         result = ada_bridge.install()
         check("install after failed swap succeeds", result["ok"] is True
-              and result["version"] == "9.9.12-test", str(result))
+              and result["version"] == "9.9.12", str(result))
         check("recovered to the new release",
               read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v3")
 
@@ -276,14 +343,14 @@ def main():
             os.rename(bundle_dest, bundle_dest + ".old")
             make_bundle(bundle_dest, "half")
 
-        good_base_url = ada_bridge.BASE_URL
+        good_policy = release_verify.CLI_POLICY
         for label, build_state in (("after binary parked", s1),
                                    ("after new binary live", s2),
                                    ("after bundle parked", s3),
                                    ("after full swap, backups parked", s4)):
             reset_live()
             build_state()
-            ada_bridge.BASE_URL = "file://" + os.path.join(root, "no-such-cdn")
+            release_verify.CLI_POLICY = cli_policy(os.path.join(root, "no-such-cdn"))
             result = ada_bridge.install()
             restored = (result["ok"] is False
                         and read(ada_bridge.ADA) == old_binary
@@ -295,15 +362,15 @@ def main():
                         and not os.path.exists(journal_path))
             check("crash recovery (%s): old install restored before network" % label,
                   restored, str(result))
-        ada_bridge.BASE_URL = good_base_url
+        release_verify.CLI_POLICY = good_policy
 
         # 9. Crash state + reachable CDN: recover, then upgrade normally.
         reset_live()
         s3()
-        publish_release(cdn, "9.9.13-test", FAKE_ADA_OK, bundle_marker="bundle-v4")
+        publish_release(cdn, "9.9.13", FAKE_ADA_OK, bundle_marker="bundle-v4")
         result = ada_bridge.install()
         check("crash state + good CDN: recovers then installs",
-              result["ok"] is True and result["version"] == "9.9.13-test"
+              result["ok"] is True and result["version"] == "9.9.13"
               and read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v4"
               and not os.path.exists(journal_path),
               str(result))
@@ -332,7 +399,7 @@ def main():
         write_journal(False, False)
         write_file(ada_bridge.ADA, newbin)
         make_bundle(bundle_dest + ".new", "half")
-        ada_bridge.BASE_URL = "file://" + os.path.join(root, "no-such-cdn")
+        release_verify.CLI_POLICY = cli_policy(os.path.join(root, "no-such-cdn"))
         result = ada_bridge.install()
         check("fresh crash (binary live, bundle staged): rolled back to not-installed",
               result["ok"] is False and clean_after_fresh_crash(), str(result))
@@ -353,7 +420,7 @@ def main():
         result = ada_bridge.install()
         check("fresh crash (staging only, no journal): cleaned to not-installed",
               result["ok"] is False and clean_after_fresh_crash(), str(result))
-        ada_bridge.BASE_URL = good_base_url
+        release_verify.CLI_POLICY = good_policy
 
         # Fresh crash + reachable CDN: recovery, then a clean first install.
         wipe_install()
@@ -362,7 +429,7 @@ def main():
         make_bundle(bundle_dest + ".new", "half")
         result = ada_bridge.install()
         check("fresh crash + good CDN: recovers then installs",
-              result["ok"] is True and result["version"] == "9.9.13-test"
+              result["ok"] is True and result["version"] == "9.9.13"
               and read(os.path.join(bundle_dest, "marker.txt")) == "bundle-v4"
               and not os.path.exists(journal_path), str(result))
 
@@ -372,10 +439,10 @@ def main():
         live_binary = read(ada_bridge.ADA)
         write_file(ada_bridge.ADA + ".old", "#!/bin/sh\necho stale\n")
         make_bundle(bundle_dest + ".old", "stale")
-        publish_release(cdn, "9.9.14-test", FAKE_ADA_OK, bundle_marker="bundle-v5")
+        publish_release(cdn, "9.9.14", FAKE_ADA_OK, bundle_marker="bundle-v5")
         result = ada_bridge.install()
         check("stray .old without journal: dropped as garbage, install proceeds",
-              result["ok"] is True and result["version"] == "9.9.14-test"
+              result["ok"] is True and result["version"] == "9.9.14"
               and not os.path.exists(ada_bridge.ADA + ".old")
               and not os.path.isdir(bundle_dest + ".old"), str(result))
         del live_binary
@@ -398,7 +465,7 @@ def main():
               and os.path.exists(journal_path), str(result))
         result = ada_bridge.install()
         check("recovery retry after barrier failure: repairs commit, install succeeds",
-              result["ok"] is True and result["version"] == "9.9.14-test"
+              result["ok"] is True and result["version"] == "9.9.14"
               and not os.path.exists(journal_path), str(result))
 
         # Idempotency: running recovery twice against the same upgrade
@@ -413,7 +480,7 @@ def main():
                 write_file(ada_bridge.ADA, newbin)
                 os.rename(bundle_dest, bundle_dest + ".old")
                 make_bundle(bundle_dest + ".new", "half")
-            ada_bridge.BASE_URL = "file://" + os.path.join(root, "no-such-cdn")
+            release_verify.CLI_POLICY = cli_policy(os.path.join(root, "no-such-cdn"))
             result = ada_bridge.install()
             check("recovery idempotent (run %d): restored state stable" % attempt,
                   result["ok"] is False
@@ -422,7 +489,7 @@ def main():
                   and not os.path.exists(journal_path)
                   and not os.path.exists(ada_bridge.ADA + ".old")
                   and not os.path.isdir(bundle_dest + ".old"), str(result))
-        ada_bridge.BASE_URL = good_base_url
+        release_verify.CLI_POLICY = good_policy
 
         # 13. Final commit sync failure (Codex round 6): if the post-unlink
         # directory sync fails, BOTH .old backups must survive and the
@@ -430,7 +497,7 @@ def main():
         # journal's fate is uncertain opens a mixed-version reboot. The
         # injected wrapper fails only once the journal is gone, so the
         # earlier barriers run for real.
-        publish_release(cdn, "9.9.15-test", FAKE_ADA_OK, bundle_marker="bundle-v6")
+        publish_release(cdn, "9.9.15", FAKE_ADA_OK, bundle_marker="bundle-v6")
         pre_upgrade_binary = read(ada_bridge.ADA)
 
         def fail_after_unlink(path):
@@ -446,14 +513,14 @@ def main():
               and os.path.isfile(ada_bridge.ADA + ".old")
               and os.path.isdir(bundle_dest + ".old")
               and read(ada_bridge.ADA + ".old") == pre_upgrade_binary
-              and "9.9.15-test" in read(ada_bridge.ADA)
+              and "9.9.15" in read(ada_bridge.ADA)
               and not os.path.exists(journal_path), str(result))
         # Reboot outcome B (journal absent): both backups discarded as
         # garbage, the validated new install stays. (Outcome A — journal
         # present restores BOTH old components — is section 8's s4 case.)
         result = ada_bridge.install()
         check("retry after commit-sync failure: backups dropped, install settles",
-              result["ok"] is True and result["version"] == "9.9.15-test"
+              result["ok"] is True and result["version"] == "9.9.15"
               and not os.path.exists(ada_bridge.ADA + ".old")
               and not os.path.isdir(bundle_dest + ".old"), str(result))
 
@@ -594,19 +661,25 @@ echo done
             json.dump({"version": "0.5.0"}, f)
         os.environ["ADA_UT_APP_SETTINGS_PATH"] = settings_path
         os.environ["ADA_UT_APP_MANIFEST"] = own_manifest
-        old_app_base = ada_bridge.APP_BASE_URL
-        ada_bridge.APP_BASE_URL = "file://" + app_cdn
+        old_app_policy = release_verify.APP_POLICY
+        release_verify.APP_POLICY = app_policy(app_cdn)
 
-        def publish_app(version, data=b"click-bytes", **overrides):
+        def publish_app(version, data=b"click-bytes", sequence=None, **overrides):
+            """Signed app-channel fixture; overrides are SIGNED lies about
+            the click (size/sha256) or its asset name (filename)."""
             click_name = "ada.permaevidence_%s_all.click" % version
-            with open(os.path.join(app_cdn, click_name), "wb") as f:
+            os.makedirs(os.path.join(app_cdn, "v" + version), exist_ok=True)
+            with open(os.path.join(app_cdn, "v" + version, click_name), "wb") as f:
                 f.write(data)
-            manifest = {"version": version, "filename": click_name,
-                        "sha256": hashlib.sha256(data).hexdigest(),
-                        "size": len(data)}
-            manifest.update(overrides)
-            with open(os.path.join(app_cdn, "manifest.json"), "w") as f:
-                json.dump(manifest, f)
+            entry = {"url": "file://%s/v%s/%s" % (app_cdn, version,
+                                                  overrides.get("filename", click_name)),
+                     "sha256": overrides.get("sha256", hashlib.sha256(data).hexdigest()),
+                     "size": overrides.get("size", len(data))}
+            sequence = next(_SEQ) if sequence is None else sequence
+            LAST_SEQUENCE["app"] = sequence
+            with open(os.path.join(app_cdn, "manifest.sig.json"), "wb") as f:
+                f.write(APP_KEY.sign(manifest_bytes("ada-ut", version, sequence,
+                                                    {"click": entry})))
 
         pkcon_bin = os.path.join(app_root, "pkconbin")
         pkcon_out = os.path.join(app_root, "pkcon_args")
@@ -660,9 +733,9 @@ echo done
                   and result["available"] == "0.6.0", str(result))
             publish_app("0.6.0", size="huge")
             result = ada_bridge.app_update_check()
-            check("app_update_check: malformed manifest refused",
-                  result["ok"] is False and "malformed" in result["error"],
-                  str(result))
+            check("app_update_check: signed-but-malformed manifest refused",
+                  result["ok"] is False and "refused" in result["error"]
+                  and result.get("kind") == "bad-platform", str(result))
             publish_app("0.6.0", filename="../evil.click")
             result = ada_bridge.app_update_check()
             check("app_update_check: traversal filename refused",
@@ -694,9 +767,34 @@ echo done
             # Install: size mismatch → refused, no pkcon.
             publish_app("0.6.0", size=1)
             result = ada_bridge.app_update_install()
-            check("app_update_install: size mismatch refused, no pkcon",
-                  result["ok"] is False and "size mismatch" in result["error"]
+            check("app_update_install: body beyond the signed size refused, no pkcon",
+                  result["ok"] is False and "authenticated size" in result["error"]
                   and not os.path.exists(pkcon_out), str(result))
+
+            # Signed channel: rollback + tampering refused, floor recorded
+            # only after a VERIFIED install.
+            publish_app("0.6.0", sequence=LAST_SEQUENCE["app"] - 5)
+            result = ada_bridge.app_update_install()
+            check("app_update_install: older sequence than the floor refused (rollback)",
+                  result["ok"] is False and result.get("kind") == "rollback"
+                  and not os.path.exists(pkcon_out), str(result))
+            publish_app("0.6.0")
+            env_path = os.path.join(app_cdn, "manifest.sig.json")
+            envelope = json.load(open(env_path))
+            envelope["signature"] = ("B" if envelope["signature"][0] != "B" else "C") + envelope["signature"][1:]
+            json.dump(envelope, open(env_path, "w"))
+            result = ada_bridge.app_update_install()
+            check("app_update_install: tampered envelope refused, no pkcon",
+                  result["ok"] is False and result.get("kind") == "bad-signature"
+                  and not os.path.exists(pkcon_out), str(result))
+            publish_app("0.6.0")
+            result = ada_bridge.app_update_install()
+            check("app_update_install: verified install records the app floor",
+                  result["ok"] is True and result["updated"] is True
+                  and release_verify.trust_floor(
+                      release_verify.APP_POLICY.trust_domain)[0] == LAST_SEQUENCE["app"],
+                  str(result))
+            os.unlink(pkcon_out)
 
             # Install: pkcon failure surfaces honestly, staging still cleaned.
             publish_app("0.6.0")
@@ -830,8 +928,7 @@ echo done
                   and not os.path.exists(pkcon_out), str(result))
 
             # Auto-update: off → no run AND no network (dead CDN proves it).
-            ada_bridge.APP_BASE_URL = "file://" + os.path.join(
-                app_root, "no-such-cdn")
+            release_verify.APP_POLICY = app_policy(os.path.join(app_root, "no-such-cdn"))
             result = ada_bridge.app_auto_update()
             check("app_auto_update: off → ran False, no fetch",
                   result == {"ran": False}, str(result))
@@ -840,8 +937,8 @@ echo done
             result = ada_bridge.app_auto_update()
             check("app_auto_update: on → ran True, surfaces fetch error",
                   result["ran"] is True and result["ok"] is False
-                  and "update server" in result["error"], str(result))
-            ada_bridge.APP_BASE_URL = "file://" + app_cdn
+                  and result.get("kind") == "unreachable", str(result))
+            release_verify.APP_POLICY = app_policy(app_cdn)
             publish_app("0.6.0")
             result = ada_bridge.app_auto_update()
             check("app_auto_update: on → installs newer version",
@@ -853,7 +950,7 @@ echo done
             os.environ.pop("ADA_UT_CLICK_DBUS_TOOL", None)
             os.environ.pop("ADA_UT_APP_SETTINGS_PATH", None)
             os.environ.pop("ADA_UT_APP_MANIFEST", None)
-            ada_bridge.APP_BASE_URL = old_app_base
+            release_verify.APP_POLICY = old_app_policy
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

@@ -9,10 +9,12 @@ pyotherside.send() events.
 Contract notes:
 - setup-api requests go as one JSON object on the child's stdin, NEVER on
   argv (argv is world-readable via /proc).
-- The install flow mirrors scripts/get-ada.sh in ada-cli: manifest →
-  platform tarball + .sha256 → verify → ada + resources next to each other
-  in ~/.local/bin → --version + bundle-check smoke, then PATH wiring for
-  login shells (UT's Terminal app reads ~/.profile).
+- The install flow mirrors scripts/get-ada.sh in ada-cli: signed release
+  envelope (verified with the baked CLI key, anti-rollback — release_verify)
+  → authenticated platform tarball (size-bounded, hashed while streaming)
+  → ada + resources next to each other in ~/.local/bin → --version +
+  bundle-check smoke, then PATH wiring for login shells (UT's Terminal app
+  reads ~/.profile).
 """
 
 import errno
@@ -29,6 +31,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import release_verify
+
 try:
     import pyotherside
 except ImportError:  # unit-testing off-device
@@ -38,8 +42,9 @@ except ImportError:  # unit-testing off-device
             pass
     pyotherside = _NullSide()
 
-BASE_URL = os.environ.get(
-    "ADA_BASE_URL", "https://z3hrivnareyralos.public.blob.vercel-storage.com/cli")
+# Where the CLI comes from: release_verify.CLI_POLICY (signed GitHub
+# Releases channel, pinned key, pinned artifact location). Nothing here is
+# read from the environment on purpose — see release_verify's docstring.
 INSTALL_DIR = os.path.expanduser("~/.local/bin")
 ADA = os.path.join(INSTALL_DIR, "ada")
 BUNDLE_NAME = "ada-cli_ada.resources"  # SwiftPM resource artifact on Linux
@@ -105,6 +110,7 @@ def detect():
     # Version gating alone would hide chat from -dev builds that DO serve it,
     # so the live socket wins over the version string. Same resolution rule
     # as chat_client.socket_path() (env seam included) so the two can't drift.
+    info["release_verifier"] = release_verify.provider_status()
     info["chat_socket"] = os.path.exists(os.environ.get(
         "ADA_CHAT_SOCKET",
         os.path.expanduser("~/.local/share/ada/app-chat.sock")))
@@ -411,45 +417,32 @@ def install():
     if recovery_failure:
         return fail(recovery_failure)
 
-    _progress("manifest", 2, "Reading the release manifest…")
+    _progress("manifest", 2, "Fetching the signed release metadata…")
     try:
-        manifest = json.loads(_fetch(BASE_URL + "/manifest.json", timeout=30))
-    except Exception as exc:
-        return fail("could not read the release manifest: %s" % exc)
-    entry = (manifest.get("platforms") or {}).get(key)
-    if not entry or not entry.get("url") or not entry.get("sha256"):
-        return fail("no build for %s in the manifest" % key)
-    version = manifest.get("version", "?")
+        manifest = release_verify.resolve_release(release_verify.CLI_POLICY)
+    except release_verify.ReleaseVerifyError as exc:
+        return fail("release metadata refused (%s): %s" % (exc.kind, exc))
+    entry = manifest["platforms"].get(key)
+    if entry is None:
+        return fail("no build for %s in the signed release" % key)
+    version = manifest["version"]
 
     _progress("download", 5, "Downloading Ada CLI %s…" % version)
     tmp_dir = tempfile.mkdtemp(prefix="ada-ut-install-")
     try:
         tarball = os.path.join(tmp_dir, "ada.tar.gz")
-        try:
-            request = urllib.request.Request(
-                entry["url"], headers={"User-Agent": "ada-ut-app"})
-            with urllib.request.urlopen(request, timeout=120) as response:
-                total = int(response.headers.get("Content-Length") or 0)
-                digest = hashlib.sha256()
-                done = 0
-                with open(tarball, "wb") as sink:
-                    while True:
-                        chunk = response.read(256 * 1024)
-                        if not chunk:
-                            break
-                        sink.write(chunk)
-                        digest.update(chunk)
-                        done += len(chunk)
-                        if total:
-                            _progress("download", 5 + 70 * done // total,
-                                      "Downloading… %d / %d MB"
-                                      % (done // 2**20, total // 2**20))
-        except Exception as exc:
-            return fail("download failed: %s" % exc)
 
-        _progress("verify", 78, "Verifying checksum…")
-        if digest.hexdigest() != entry["sha256"].strip().lower():
-            return fail("checksum mismatch — download corrupted, try again")
+        def on_progress(done, total):
+            _progress("download", 5 + 70 * done // total,
+                      "Downloading… %d / %d MB" % (done // 2**20, total // 2**20))
+        # The bound and the hash are the AUTHENTICATED ones from the
+        # envelope; a server lying about Content-Length changes nothing.
+        download_failure = release_verify.download_to_file(
+            entry["url"], tarball, entry["size"], entry["sha256"],
+            progress=on_progress)
+        if download_failure:
+            return fail(download_failure)
+        _progress("verify", 78, "Checksum verified")
 
         _progress("extract", 82, "Unpacking…")
         extract_failure = _extract_release(tarball, tmp_dir)
@@ -596,8 +589,18 @@ def install():
     _fsync_dir(INSTALL_DIR)  # ordering aid only
 
     _wire_login_shell_path()
+    # Anti-rollback floor: recorded ONLY now that the release is live and
+    # committed. A failure to persist it is reported, not fatal — the
+    # embedded minimum still applies and the next successful install
+    # records again.
+    trust_note = None
+    try:
+        release_verify.record_accepted(release_verify.CLI_POLICY, manifest)
+    except OSError as exc:
+        trust_note = "could not record the anti-rollback floor: %s" % exc
     _progress("done", 100, "Ada CLI %s installed" % staged_version)
-    return {"ok": True, "version": staged_version, "error": None}
+    return {"ok": True, "version": staged_version, "error": None,
+            "sequence": manifest["sequence"], "trust_note": trust_note}
 
 
 # ---------------------------------------------------------------- service & privileged helpers (M4)
@@ -719,17 +722,15 @@ def _wire_login_shell_path():
             pass  # PATH is a convenience; the app always uses absolute paths
 
 # ---------------------------------------------------------- app self-update
-# The click itself, not the CLI: the website publishes each release to the
-# Blob CDN (ada-ut scripts/publish_click.sh) with a manifest.json carrying
-# version + sha256, and this unconfined app may run pkcon on its own new
-# package. The running instance keeps executing OLD code after a successful
-# install — callers must tell the user to close and reopen the app.
+# The click itself, not the CLI: scripts/publish_click.sh publishes each
+# release as an immutable GitHub Release of permaevidence/ada-ut (click +
+# signed envelope, release_verify.APP_POLICY), and this unconfined app may
+# install its own new package. The running instance keeps executing OLD
+# code after a successful install — callers must tell the user to close and
+# reopen the app.
 
-APP_BASE_URL = os.environ.get(
-    "ADA_UT_APP_BASE_URL",
-    "https://z3hrivnareyralos.public.blob.vercel-storage.com/app")
-# A click is ~250 KB; bound what a corrupted-but-served manifest can make
-# us download.
+# A click is ~250 KB; bound what even an AUTHENTICATED manifest can make us
+# download (a signed-but-absurd size is still refused).
 MAX_CLICK_BYTES = 20 * 2**20
 
 
@@ -810,25 +811,24 @@ def app_update_check():
     if installed is None:
         return {"ok": False, "error": "cannot read the app's own version"}
     try:
-        manifest = json.loads(_fetch(APP_BASE_URL + "/manifest.json",
-                                     timeout=30))
-    except Exception as exc:
-        return {"ok": False,
-                "error": "could not reach the update server: %s" % exc}
-    version = manifest.get("version") if isinstance(manifest, dict) else None
-    filename = manifest.get("filename") if isinstance(manifest, dict) else None
-    sha256 = manifest.get("sha256") if isinstance(manifest, dict) else None
-    size = manifest.get("size") if isinstance(manifest, dict) else None
-    if not (isinstance(version, str) and isinstance(filename, str)
-            and isinstance(sha256, str) and isinstance(size, int)):
-        return {"ok": False, "error": "malformed update manifest"}
-    # The filename becomes a local staging name — refuse anything that could
-    # escape the cache directory even though the manifest is our own.
-    if "/" in filename or "\\" in filename or filename.startswith("."):
-        return {"ok": False, "error": "suspicious filename in update manifest"}
-    return {"ok": True, "installed": installed, "available": version,
-            "filename": filename, "sha256": sha256, "size": size,
-            "update_available": _version_newer(version, installed)}
+        manifest = release_verify.resolve_release(release_verify.APP_POLICY)
+    except release_verify.ReleaseVerifyError as exc:
+        return {"ok": False, "kind": exc.kind,
+                "error": "update metadata refused (%s): %s" % (exc.kind, exc)}
+    entry = manifest["platforms"].get("click")
+    if entry is None:
+        return {"ok": False, "kind": "bad-platform",
+                "error": "the signed release lists no click package"}
+    filename = entry["filename"]  # already a plain asset name (validated)
+    if not filename.endswith(".click"):
+        return {"ok": False, "kind": "bad-platform",
+                "error": "the signed release's package is not a .click"}
+    return {"ok": True, "installed": installed, "available": manifest["version"],
+            "filename": filename, "sha256": entry["sha256"],
+            "size": entry["size"], "url": entry["url"],
+            "sequence": manifest["sequence"], "floor": manifest["floor"],
+            "trust_note": manifest["trust_note"],
+            "update_available": _version_newer(manifest["version"], installed)}
 
 
 # Lomiri launches apps with a slimmer PATH than the Terminal's login shell
@@ -968,27 +968,18 @@ def app_update_install():
         return {"ok": False,
                 "error": "update is implausibly large (%d bytes)"
                          % checked["size"]}
-    url = APP_BASE_URL + "/" + urllib.parse.quote(checked["filename"])
-    try:
-        data = _fetch(url, timeout=120)
-    except Exception as exc:
-        return {"ok": False, "error": "download failed: %s" % exc}
-    if len(data) != checked["size"]:
-        return {"ok": False,
-                "error": "download size mismatch (%d != %d bytes)"
-                         % (len(data), checked["size"])}
-    if hashlib.sha256(data).hexdigest() != checked["sha256"]:
-        return {"ok": False,
-                "error": "checksum mismatch — refusing to install"}
     staging_dir = os.path.dirname(_app_settings_path())
     click_path = os.path.join(staging_dir, checked["filename"])
     try:
         os.makedirs(staging_dir, exist_ok=True)
-        with open(click_path, "wb") as f:
-            f.write(data)
     except OSError as exc:
         return {"ok": False, "error": "could not stage the download: %s" % exc}
     try:
+        # Authenticated url + exact size bound + streaming hash.
+        download_failure = release_verify.download_to_file(
+            checked["url"], click_path, checked["size"], checked["sha256"])
+        if download_failure:
+            return {"ok": False, "error": download_failure}
         ok, error = _install_click(click_path)
         if not ok:
             return {"ok": False, "error": error[:600]}
@@ -999,6 +990,14 @@ def app_update_install():
                              "registry still shows v%s — the update did not "
                              "actually land; try installing from Morph + "
                              "OpenStore instead" % seen}
+        # The new app is verified installed: raise this device's floor for
+        # the app channel so nothing older is ever accepted again.
+        trust_note = None
+        try:
+            release_verify.trust_record(release_verify.APP_POLICY.trust_domain,
+                                        checked["sequence"])
+        except OSError as exc:
+            trust_note = "could not record the anti-rollback floor: %s" % exc
     finally:
         try:
             os.unlink(click_path)
@@ -1006,7 +1005,8 @@ def app_update_install():
             pass
     return {"ok": True, "updated": True, "needs_relaunch": True,
             "installed": checked["installed"],
-            "available": checked["available"]}
+            "available": checked["available"],
+            "sequence": checked["sequence"], "trust_note": trust_note}
 
 
 def app_auto_update():
