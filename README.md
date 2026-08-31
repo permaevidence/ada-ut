@@ -147,16 +147,23 @@ envelope last, atomic go-live), re-downloads and byte-compares the public
 state, and only then records the publication. The run holds an
 exclusive cross-process lock (a second publisher is refused), repeats the
 authenticated supersession check immediately before the release is
-created, and pins the tag to the exact reviewed HEAD commit, which must
-already be on `origin/main`. `--dry-run` stops before publishing;
-`--bootstrap` is accepted once, for the first signed release;
-`--legacy-blob` additionally refreshes the pre-signature Blob layout during
-the transition window so app versions ≤ 0.7.3 can make their last
-unsigned hop — and if that step fails after the immutable release is live,
-`--legacy-blob-only` is the idempotent recovery: it authenticates the live
-GitHub release, checks its click against the signed size and hash, and
-republishes exactly that. Every release bumps `APP_RELEASE_SEQUENCE` in
-`py/release_verify.py` together with `manifest.json`'s version.
+created, and binds the tag to the exact reviewed HEAD commit (which must
+already be on `origin/main`) by resolving `refs/tags/v<version>` through
+the Git References API before the draft, before publication and after it
+— a pre-existing tag naming another commit is refused. `--dry-run` stops
+before publishing; `--bootstrap` was accepted once, for the first signed
+release (0.7.4). Every release bumps `APP_RELEASE_SEQUENCE` in
+`py/release_verify.py` together with `manifest.json`'s version. GitHub
+Releases is the only distribution channel; the pre-signature Blob layout
+was retired on 2026-08-31.
+
+`scripts/release_watch.py` is the deterministic release-channel watcher
+(both the CLI and app channels): it re-verifies the live envelopes with
+the pinned keys, cross-checks GitHub (recorded release, tag → commit,
+immutability, latest pointer), probes and periodically re-hashes every
+asset, checks the released installer and the website, and alerts over
+Telegram on any mismatch; `scripts/install_release_watch.sh` installs it as
+launchd agents on a Mac, `scripts/watch_selftest.py` is its battery.
 
 Tests: `scripts/release_selftest.py` (verifier), `scripts/bridge_selftest.py`
 (signed install/update paths, rollback, tampering, fault injection) and
