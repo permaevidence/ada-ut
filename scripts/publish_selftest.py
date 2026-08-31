@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Battery for scripts/publish_click.sh + scripts/release/publish-github-release.sh
-against an in-process fake GitHub Releases API, download host and Blob store,
-with fault injection. Runs the REAL scripts on a throwaway copy of this
+against an in-process fake GitHub Releases API and download host, with fault
+injection. Runs the REAL scripts on a throwaway copy of this
 repository whose app key is a generated test key.
 
     python3 scripts/publish_selftest.py
@@ -39,17 +39,15 @@ def check(label, ok, detail=""):
 
 
 class FakeGitHub:
-    """Releases API + uploads + public download host + Blob, one server."""
+    """Releases API + uploads + public download host + git refs, one server."""
 
     def __init__(self):
         self.releases = {}
         self.next_id = 100
-        self.blob = {}
         self.hits = []
         self.faults = {}   # upload_fail: asset name; patch: "ambiguous"|"fail";
         #                   download_substitute: name -> bytes; latest_override: bytes;
         #                   latest_queue: [bytes, ...] served in order (race simulation);
-        #                   blob_fail: blob pathname whose PUT fails;
         #                   ref_status: HTTP status forced on the tag-ref lookup;
         #                   ref_prefix_match: answer the lookup with a DIFFERENT ref name;
         #                   tag_on_publish: sha the tag gets at publish time regardless
@@ -154,10 +152,6 @@ class FakeGitHub:
                             sub = gh.faults.get("download_substitute", {})
                             return self._send(200, sub.get(m.group(2), r["assets"][m.group(2)]))
                     return self._send(404, b"")
-                m = re.match(r"^/blobpub/(.+)$", path)
-                if m:
-                    blob = gh.blob.get(m.group(1))
-                    return self._send(200, blob) if blob is not None else self._send(404, b"")
                 self._send(404, b"")
 
             def do_POST(self):
@@ -218,18 +212,6 @@ class FakeGitHub:
                 m = re.match(r"^/api/repos/([^/]+/[^/]+)/releases/(\d+)$", self.path)
                 r = gh.releases.pop(int(m.group(2)), None) if m else None
                 self._send(204 if r else 404, b"")
-
-            def do_PUT(self):
-                gh.hits.append(("PUT", self.path))
-                body = self._body()
-                m = re.match(r"^/blob/(.+)$", self.path)
-                if m and self.headers.get("Authorization") == "Bearer b10b":
-                    pathname = urllib.parse.unquote(m.group(1))
-                    if gh.faults.get("blob_fail") == pathname:
-                        return self._json(500, {"message": "injected blob failure"})
-                    gh.blob[pathname] = body
-                    return self._json(200, {"url": "ok"})
-                self._json(403, {})
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -298,8 +280,7 @@ def main():
         "PUBLIC_DOWNLOAD_BASE": gh.base + "/download",
         "LIVE_ENVELOPE_URL": gh.base + "/latest/manifest.sig.json",
         "SIGNING_KEY": key.priv, "PUBLICATION_LOG": log, "PUBLIC_RETRY_SLEEP": "0.05",
-        "BLOB_API_URL": gh.base + "/blob", "BLOB_PUBLIC_PREFIX": gh.base + "/blobpub/app",
-        "BLOB_TOKEN": "b10b", "HOME": root, "PUBLISH_LOCK": os.path.join(root, "publish.lock"),
+        "HOME": root, "PUBLISH_LOCK": os.path.join(root, "publish.lock"),
     }
 
     def run(*args, **env):
@@ -484,60 +465,6 @@ def main():
               rc != 0 and "NOT immutable" in out and len(log_lines()) == before, out)
         del gh.faults["immutable"]
 
-        print("— legacy Blob dual-publish —")
-        stamp(9, "0.7.12")
-        rc, out = run("--legacy-blob")
-        legacy = json.loads(gh.blob.get("app/manifest.json", b"{}"))
-        click_built = open(os.path.join(repo, "build", "ada.permaevidence_0.7.12_all.click"), "rb").read()
-        check("--legacy-blob publishes the click + legacy manifest for apps ≤ 0.7.3",
-              rc == 0 and gh.blob.get("app/ada.permaevidence_0.7.12_all.click") == click_built
-              and legacy.get("version") == "0.7.12" and legacy.get("sha256") == hashlib.sha256(click_built).hexdigest()
-              and legacy.get("size") == len(click_built) and legacy.get("filename") == "ada.permaevidence_0.7.12_all.click", out)
-        print("— legacy Blob recovery (--legacy-blob-only) —")
-        stamp(10, "0.7.13")
-        gh.faults["blob_fail"] = "app/ada.permaevidence_0.7.13_all.click"
-        rc, out = run("--legacy-blob")
-        check("click Blob upload fails → GitHub live + recorded, exit 1 pointing at --legacy-blob-only, legacy manifest untouched",
-              rc != 0 and "--legacy-blob-only" in out and gh.latest()["tag_name"] == "v0.7.13"
-              and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.12"
-              and json.loads(log_lines()[-1])["version"] == "0.7.13", out)
-        del gh.faults["blob_fail"]
-        rc, out = run("--legacy-blob-only")
-        click_built = open(os.path.join(repo, "build", "ada.permaevidence_0.7.13_all.click"), "rb").read()
-        check("--legacy-blob-only republishes exactly the live click + manifest from the authenticated release",
-              rc == 0 and gh.blob.get("app/ada.permaevidence_0.7.13_all.click") == click_built
-              and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.13"
-              and json.loads(gh.blob["app/manifest.json"])["sha256"] == hashlib.sha256(click_built).hexdigest(), out)
-        writes_before = len([h for h in gh.hits if h[0] in ("POST", "PATCH", "DELETE")])
-        rc, out = run("--legacy-blob-only")
-        check("--legacy-blob-only is idempotent and never writes to GitHub",
-              rc == 0 and len([h for h in gh.hits if h[0] in ("POST", "PATCH", "DELETE")]) == writes_before
-              and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.13", out)
-        stamp(11, "0.7.14")
-        gh.faults["blob_fail"] = "app/manifest.json"
-        rc, out = run("--legacy-blob")
-        check("legacy manifest upload fails after the click → exit 1, recovery advised",
-              rc != 0 and "--legacy-blob-only" in out and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.13", out)
-        del gh.faults["blob_fail"]
-        rc, out = run("--legacy-blob-only")
-        check("recovery after a manifest-upload failure", rc == 0 and json.loads(gh.blob["app/manifest.json"])["version"] == "0.7.14", out)
-        gh.faults["download_substitute"] = {"ada.permaevidence_0.7.14_all.click": b"evil"}
-        rc, out = run("--legacy-blob-only")
-        check("--legacy-blob-only refuses a live click that does not match its signed hash",
-              rc != 0 and "does not match" in out, out)
-        del gh.faults["download_substitute"]
-        rc, out = run("--legacy-blob-only", "--bootstrap")
-        check("--legacy-blob-only rejects other mode flags", rc == 2, out)
-        gh.faults["latest_override"] = b"{}"
-        rc, out = run("--legacy-blob-only")
-        check("--legacy-blob-only with an unverifiable live envelope → hard stop", rc != 0 and "hard stop" in out, out)
-        del gh.faults["latest_override"]
-        gh.blob["app/manifest.json"] = json.dumps({"version": "9.9.9"}).encode()
-        stamp(12, "0.7.15")
-        rc, out = run("--legacy-blob")
-        check("newer legacy manifest live → GitHub publishes, Blob left alone",
-              rc == 0 and "left alone" in out and gh.latest()["tag_name"] == "v0.7.15"
-              and json.loads(gh.blob["app/manifest.json"])["version"] == "9.9.9", out)
         print("— tag binding (refs API, not target_commitish) —")
         by_tag_log = {json.loads(l)["tag"]: json.loads(l)["commit"] for l in log_lines()}
         check("every tag created so far names the commit recorded for its publication",
@@ -611,7 +538,8 @@ def main():
         check("every publication in the log is monotonic",
               [json.loads(l)["sequence"] for l in log_lines()] == sorted({json.loads(l)["sequence"] for l in log_lines()}),
               log_lines())
-        check("the token never appears in output", "t0k" not in out and "b10b" not in out)
+        check("--legacy-blob flags are gone (retired transition)", run("--legacy-blob")[0] == 2 and run("--legacy-blob-only")[0] == 2)
+        check("the token never appears in output", "t0k" not in out)
     finally:
         gh.close()
         shutil.rmtree(root, ignore_errors=True)

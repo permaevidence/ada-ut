@@ -2,9 +2,7 @@
 # Publish a built .click as an IMMUTABLE, SIGNED GitHub Release of
 # permaevidence/ada-ut (docs: ada-cli RELEASE_SIGNING_PLAN.md §9.3).
 #
-#   scripts/publish_click.sh [--bootstrap] [--legacy-blob] [--dry-run]
-#                            [--allow-dirty] [version]
-#   scripts/publish_click.sh --legacy-blob-only     (recovery, see below)
+#   scripts/publish_click.sh [--bootstrap] [--dry-run] [--allow-dirty] [version]
 #
 # Flow (every step fails closed):
 #   1. source state: clean tree, version == manifest.json, exact SemVer,
@@ -20,14 +18,11 @@
 #   5. draft release, assets, envelope last, atomic publish (immutable);
 #   6. re-download the public envelope + click and require byte identity;
 #      require the release to be immutable and non-draft;
-#   7. record the publication (outside the repo) only after step 6;
-#   8. --legacy-blob: ALSO publish the pre-signature Blob layout so app
-#      versions ≤ 0.7.3 can make their last unsigned hop (transition only).
-#      If that step fails the GitHub release is already live and immutable
-#      and cannot be re-run; --legacy-blob-only is the idempotent recovery:
-#      it authenticates the LIVE GitHub release with the committed key,
-#      downloads its click, checks size + sha256, and republishes exactly
-#      that click and legacy manifest.
+#   7. record the publication (outside the repo) only after step 6.
+#
+# The pre-signature Vercel Blob layout (apps ≤ 0.7.3) was retired on
+# 2026-08-31 once every device was on 0.7.4; GitHub Releases is the only
+# distribution channel.
 #
 # Concurrency: the whole run holds an exclusive cross-process lock (outside
 # the repository; a second publisher is refused, not queued), and the
@@ -44,8 +39,8 @@
 #      EXPECTED_PUB committed public key (default .release-keys/ada-ut-release.pub.pem)
 #      GH_TOKEN     (default: `gh auth token`), REPO (default permaevidence/ada-ut)
 #      GH_API_URL / GH_UPLOADS_URL / PUBLIC_DOWNLOAD_BASE / LIVE_ENVELOPE_URL /
-#      BLOB_API_URL / BLOB_PUBLIC_PREFIX / PUBLICATION_LOG / PUBLISHED_AT /
-#      EXPIRES_DAYS / REPO_ROOT / PUBLISH_LOCK — overrides for the selftest.
+#      PUBLICATION_LOG / PUBLISHED_AT / EXPIRES_DAYS / REPO_ROOT /
+#      PUBLISH_LOCK — overrides for the selftest.
 set -euo pipefail
 
 # --- exclusive publisher lock (re-exec under a python flock holder; the
@@ -69,12 +64,10 @@ os.execv("/bin/bash", ["/bin/bash", script] + args)
 PYEOF
 fi
 
-BOOTSTRAP=0; LEGACY_BLOB=0; BLOB_ONLY=0; DRY_RUN=0; ALLOW_DIRTY=0; VERSION_ARG=""
+BOOTSTRAP=0; DRY_RUN=0; ALLOW_DIRTY=0; VERSION_ARG=""
 for arg in "$@"; do
     case "$arg" in
         --bootstrap) BOOTSTRAP=1;;
-        --legacy-blob) LEGACY_BLOB=1;;
-        --legacy-blob-only) BLOB_ONLY=1;;
         --dry-run) DRY_RUN=1;;
         --allow-dirty) ALLOW_DIRTY=1;;
         --*) echo "✖ unknown option $arg"; exit 2;;
@@ -147,77 +140,6 @@ check_supersession() {
         echo "  live ($when): none (bootstrap accepted)"
     fi
 }
-
-# Transitional Blob layout for apps ≤ 0.7.3: click file + legacy manifest.
-# Arguments: click-path version filename sha256 size. Never clobbers a
-# NEWER live legacy manifest. Fails loudly, pointing at the recovery path.
-publish_legacy_blob() {
-    local click="$1" version="$2" filename="$3" sha="$4" size="$5"
-    : "${BLOB_TOKEN:?BLOB_TOKEN is required for the legacy Blob layout}"
-    local blob_api="${BLOB_API_URL:-https://blob.vercel-storage.com}"
-    local prefix="${BLOB_PUBLIC_PREFIX:-https://z3hrivnareyralos.public.blob.vercel-storage.com/app}"
-    local live_legacy skip
-    live_legacy="$(curl -sf "$prefix/manifest.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2>/dev/null || echo "")"
-    skip="$(python3 - "$live_legacy" "$version" <<'PYEOF'
-import sys
-def parse(v):
-    try: return [int(x) for x in v.split("-")[0].split(".")]
-    except ValueError: return None
-live, mine = parse(sys.argv[1]), parse(sys.argv[2])
-print("skip" if live and mine and live > mine else "go")
-PYEOF
-)"
-    if [ "$skip" = "skip" ]; then
-        echo "⚠ legacy Blob already serves $live_legacy (newer than $version) — legacy layout left alone"
-        return 0
-    fi
-    blob_put() {
-        local file="$1" pathname="$2" maxage="$3" encoded
-        encoded="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$pathname")"
-        curl -sf -X PUT "$blob_api/$encoded" -H "Authorization: Bearer $BLOB_TOKEN" \
-            -H "x-api-version: 7" -H "x-add-random-suffix: 0" -H "x-allow-overwrite: 1" \
-            -H "x-cache-control-max-age: $maxage" --data-binary "@$file" >/dev/null || {
-            echo "✖ legacy Blob upload of $pathname FAILED — the GitHub release IS live and immutable; apps ≤ 0.7.3 cannot see $version until this is repaired: rerun  scripts/publish_click.sh --legacy-blob-only"; exit 1; }
-        echo "  ↑ blob $pathname"
-    }
-    blob_put "$click" "app/$filename" 31536000
-    python3 - "$version" "$filename" "$sha" "$size" > "$WORK/legacy-manifest.json" <<'PYEOF'
-import json, sys, datetime
-print(json.dumps({"version": sys.argv[1], "filename": sys.argv[2], "sha256": sys.argv[3],
-                  "size": int(sys.argv[4]),
-                  "published": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}, indent=2))
-PYEOF
-    blob_put "$WORK/legacy-manifest.json" "app/manifest.json" 300
-    echo "✔ legacy Blob layout published (apps ≤ 0.7.3 can hop to $version)"
-}
-
-# --- recovery: republish the legacy layout from the AUTHENTICATED live
-# GitHub release (idempotent; touches nothing on GitHub).
-if [ "$BLOB_ONLY" = 1 ]; then
-    [ "$BOOTSTRAP$LEGACY_BLOB$DRY_RUN" = "000" ] || { echo "✖ --legacy-blob-only takes no other mode flags"; exit 2; }
-    read_live
-    [ "$LIVE_STATUS" = "200" ] || { echo "✖ no live signed release to republish (HTTP $LIVE_STATUS)"; exit 1; }
-    python3 - "$LIVE_PAYLOAD" "$WORK/live-click.json" <<'PYEOF'
-import json, sys
-m = json.load(open(sys.argv[1])); c = m["platforms"]["click"]
-name = c["url"].rsplit("/", 1)[-1]
-assert name.endswith(".click") and "/" not in name and ".." not in name, "asset is not a plain click name"
-json.dump({"url": c["url"], "sha256": c["sha256"], "size": c["size"], "name": name, "version": m["version"]}, open(sys.argv[2], "w"))
-PYEOF
-    L_URL="$(python3 -c "import json;print(json.load(open('$WORK/live-click.json'))['url'])")"
-    L_SHA="$(python3 -c "import json;print(json.load(open('$WORK/live-click.json'))['sha256'])")"
-    L_SIZE="$(python3 -c "import json;print(json.load(open('$WORK/live-click.json'))['size'])")"
-    L_NAME="$(python3 -c "import json;print(json.load(open('$WORK/live-click.json'))['name'])")"
-    echo "recovering legacy layout for v$LIVE_VER (sequence $LIVE_SEQ, $L_NAME)"
-    L_STATUS="$(curl -sSL --max-filesize "$((L_SIZE + 1))" -o "$WORK/live.click" -w '%{http_code}' "$L_URL" 2>/dev/null || echo 000)"
-    [ "$L_STATUS" = "200" ] || { echo "✖ cannot download the live click (HTTP $L_STATUS)"; exit 1; }
-    GOT_SIZE="$(wc -c < "$WORK/live.click" | tr -d ' ')"
-    GOT_SHA="$("$OPENSSL" dgst -sha256 -hex < "$WORK/live.click" | awk '{print $NF}')"
-    [ "$GOT_SIZE" = "$L_SIZE" ] && [ "$GOT_SHA" = "$L_SHA" ] || {
-        echo "✖ the live click does not match its signed size/sha256 ($GOT_SIZE/$GOT_SHA vs $L_SIZE/$L_SHA) — refusing to republish"; exit 1; }
-    publish_legacy_blob "$WORK/live.click" "$LIVE_VER" "$L_NAME" "$L_SHA" "$L_SIZE"
-    exit 0
-fi
 
 # --- 1. source state
 if [ "$ALLOW_DIRTY" = 0 ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
@@ -364,10 +286,5 @@ with open(log, "a") as f:
                         "recorded": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}) + "\n")
 PYEOF
 echo "  recorded in $LOG"
-
-# --- 8. transition only: the pre-signature Blob layout for apps ≤ 0.7.3
-if [ "$LEGACY_BLOB" = 1 ]; then
-    publish_legacy_blob "$CLICK" "$VERSION" "$FILENAME" "$SHA256" "$SIZE"
-fi
 
 echo "✔ $TAG is live: $DOWNLOAD_BASE/v$VERSION/$FILENAME"
