@@ -21,9 +21,11 @@
 #      = it could not run); only then
 #   4. the HEARTBEAT is run once in the foreground and must report healthy
 #      (the check it just watched completed seconds ago);
-#   5. only after both pass are the agents (re)written and bootstrapped —
-#      checker first, then heartbeat, without RunAtLoad (they already ran).
-#   Any failure in 3–4 rolls bin.old back and reloads the previous agents.
+#   5. only after both pass are the plists staged, linted and swapped in
+#      (previous ones kept as .old) and the agents bootstrapped — checker
+#      first, then heartbeat, without RunAtLoad (they already ran).
+#   Any failure in 3–5 rolls back: whatever was loaded is booted out, the
+#   previous plists and bin.old are restored, the previous agents reloaded.
 #
 #   scripts/install_release_watch.sh            # install / refresh
 #   scripts/install_release_watch.sh --uninstall
@@ -65,11 +67,26 @@ wait_idle() {
 }
 
 load_agents() {
-    # checker first, then heartbeat; each must be loaded before the next
+    # checker first, then heartbeat; each must be loaded before the next.
+    # Explicit returns: this runs inside `||` chains where set -e is suspended.
     local kind
     for kind in check heartbeat; do
-        launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$LABEL_BASE.$kind.plist"
-        launchctl print "gui/$UID_NUM/$LABEL_BASE.$kind" >/dev/null
+        launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$LABEL_BASE.$kind.plist" || return 1
+        launchctl print "gui/$UID_NUM/$LABEL_BASE.$kind" >/dev/null || return 1
+    done
+}
+
+restore_plists() {
+    # Undo a partial activation: drop staged .new files, put the previous
+    # plists back (or remove ours entirely on a fresh install).
+    local kind
+    for kind in check heartbeat; do
+        rm -f "$AGENTS/$LABEL_BASE.$kind.plist.new"
+        if [ -f "$AGENTS/$LABEL_BASE.$kind.plist.old" ]; then
+            mv -f "$AGENTS/$LABEL_BASE.$kind.plist.old" "$AGENTS/$LABEL_BASE.$kind.plist"
+        elif [ "${HAD_AGENTS:-0}" = 0 ]; then
+            rm -f "$AGENTS/$LABEL_BASE.$kind.plist"
+        fi
     done
 }
 
@@ -127,12 +144,16 @@ rm -rf "$BIN.old"
 mv "$BIN.new" "$BIN"
 
 rollback() {
-    echo "✖ $1 — rolling the snapshot back" >&2
+    echo "✖ $1 — rolling back" >&2
+    unload                # boot out anything the failed activation loaded
+    restore_plists        # previous plists back (no-op before activation)
     rm -rf "$BIN.failed"
     mv "$BIN" "$BIN.failed"
     if [ -d "$BIN.old" ]; then
         mv "$BIN.old" "$BIN"
-        [ "$HAD_AGENTS" = 1 ] && load_agents
+        if [ "$HAD_AGENTS" = 1 ]; then
+            load_agents || echo "  ✖ could not reload the previous agents — run 'launchctl bootstrap gui/$UID_NUM $AGENTS/$LABEL_BASE.{check,heartbeat}.plist' by hand" >&2
+        fi
         echo "  previous snapshot restored ($(cut -c1-12 "$BIN/SNAPSHOT_COMMIT" 2>/dev/null || echo unknown)); failed one kept in $BIN.failed" >&2
     else
         echo "  no previous snapshot; failed one kept in $BIN.failed, no agents loaded" >&2
@@ -180,13 +201,26 @@ plist() {  # label logname minute program-args...
 </dict></plist>
 EOF
 }
-plist "$LABEL_BASE.check" check 7 "$PY" "$BIN/release_watch.py" check --config "$CONFIG" > "$AGENTS/$LABEL_BASE.check.plist.new"
-plist "$LABEL_BASE.heartbeat" heartbeat 37 "$PY" "$BIN/release_heartbeat.py" --config "$CONFIG" > "$AGENTS/$LABEL_BASE.heartbeat.plist.new"
-for kind in check heartbeat; do
-    plutil -lint -s "$AGENTS/$LABEL_BASE.$kind.plist.new"
-    mv "$AGENTS/$LABEL_BASE.$kind.plist.new" "$AGENTS/$LABEL_BASE.$kind.plist"
-done
-load_agents
+activate() {
+    # The activation is part of the transaction: stage both plists, lint
+    # them, swap them in (previous ones kept as .old), bootstrap checker
+    # then heartbeat. Any failure → the caller rolls everything back.
+    local kind
+    plist "$LABEL_BASE.check" check 7 "$PY" "$BIN/release_watch.py" check --config "$CONFIG" > "$AGENTS/$LABEL_BASE.check.plist.new" || return 1
+    plist "$LABEL_BASE.heartbeat" heartbeat 37 "$PY" "$BIN/release_heartbeat.py" --config "$CONFIG" > "$AGENTS/$LABEL_BASE.heartbeat.plist.new" || return 1
+    for kind in check heartbeat; do
+        plutil -lint -s "$AGENTS/$LABEL_BASE.$kind.plist.new" || return 1
+    done
+    for kind in check heartbeat; do
+        if [ -f "$AGENTS/$LABEL_BASE.$kind.plist" ]; then
+            mv -f "$AGENTS/$LABEL_BASE.$kind.plist" "$AGENTS/$LABEL_BASE.$kind.plist.old" || return 1
+        fi
+        mv -f "$AGENTS/$LABEL_BASE.$kind.plist.new" "$AGENTS/$LABEL_BASE.$kind.plist" || return 1
+    done
+    load_agents || return 1
+    rm -f "$AGENTS/$LABEL_BASE.check.plist.old" "$AGENTS/$LABEL_BASE.heartbeat.plist.old"
+}
+activate || rollback "agent activation failed (plist write/lint or launchctl bootstrap/print)"
 rm -rf "$BIN.old"
 echo "✔ installed: check at :07 every hour, heartbeat at :37 every hour (both verified once in the foreground just now)"
 echo "  snapshot $(cut -c1-12 "$BIN/SNAPSHOT_COMMIT") in $BIN, logs in $LOGS"

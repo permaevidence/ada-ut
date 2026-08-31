@@ -639,10 +639,13 @@ def main():
             shim_dir = os.path.join(root, "shim"); os.makedirs(shim_dir)
             shim_log = os.path.join(root, "shim.log")
             ibin = os.path.join(iroot, "bin")
+            fail_file = os.path.join(root, "shim.fail")   # regex; the shim fails ONCE when a call matches, then deletes it
             open(os.path.join(shim_dir, "launchctl"), "w").write(
                 "#!/bin/bash\n"
                 "new=absent; [ -e '%s.new' ] && new=present\n"
-                "echo \"$1 $2 ${3:-} bin.new=$new\" >> '%s'\nexit 0\n" % (ibin, shim_log))
+                "echo \"$1 $2 ${3:-} bin.new=$new\" >> '%s'\n"
+                "if [ -f '%s' ] && echo \"$1 $2 ${3:-}\" | grep -Eq \"$(cat '%s')\"; then rm -f '%s'; echo 'injected launchctl failure' >&2; exit 1; fi\n"
+                "exit 0\n" % (ibin, shim_log, fail_file, fail_file, fail_file))
             os.chmod(os.path.join(shim_dir, "launchctl"), 0o755)
             ienv = dict(os.environ, PATH=shim_dir + os.pathsep + os.environ["PATH"], ADA_WATCH_HOME=ihome)
             installer = os.path.join(repo, "scripts", "install_release_watch.sh")
@@ -689,9 +692,46 @@ def main():
             calls = shim_calls()
             check("checker failing from the new snapshot → install exits 1, previous snapshot restored, failed one kept",
                   rc == 1 and os.path.exists(os.path.join(ibin, "MARKER")) and os.path.exists(ibin + ".failed") and not os.path.exists(ibin + ".old"), out[-400:])
-            check("…and the previous agents are reloaded after the rollback",
-                  [c.split()[0] for c in calls] == ["bootout", "bootout", "bootstrap", "print", "bootstrap", "print"], calls)
+            check("…and the previous agents are reloaded after the rollback (rollback boots out again first — idempotent)",
+                  [c.split()[0] for c in calls] == ["bootout", "bootout", "bootout", "bootout", "bootstrap", "print", "bootstrap", "print"], calls)
             open(sp, "w").write(good_i); os.unlink(sp + ".prev")
+            # activation failures (plist swap + launchctl) are part of the transaction too
+            agents_dir = os.path.join(ihome, "Library", "LaunchAgents")
+            check_plist = os.path.join(agents_dir, "com.permaevidence.ada-release-watch.check.plist")
+            hb_plist = os.path.join(agents_dir, "com.permaevidence.ada-release-watch.heartbeat.plist")
+
+            def leftovers():
+                return [f for f in os.listdir(agents_dir) if f.endswith((".plist.new", ".plist.old"))]
+
+            for label, pattern, loaded_kind in (
+                    ("checker bootstrap", r"^bootstrap .*\.check\.plist", None),
+                    ("heartbeat bootstrap", r"^bootstrap .*\.heartbeat\.plist", "check"),
+                    ("launchctl print after the heartbeat bootstrap", r"^print gui/[0-9]+/.*\.heartbeat", "heartbeat")):
+                marker_text = "<!-- OLDPLIST %s -->" % label
+                open(check_plist, "a").write("\n" + marker_text + "\n")
+                open(os.path.join(ibin, "MARKER"), "w").write("old snapshot")
+                open(fail_file, "w").write(pattern)
+                if os.path.exists(shim_log):
+                    os.unlink(shim_log)
+                rc, out = install()
+                calls = shim_calls()
+                ops_seq = [c.split()[0] for c in calls]
+                failed_at = next((i for i, c in enumerate(calls) if re.match(pattern, c)), None)
+                after = ops_seq[failed_at + 1:] if failed_at is not None else []
+                check("%s fails → exit 1, previous plists restored, no .new/.old plist left, previous snapshot restored" % label,
+                      rc == 1 and marker_text in open(check_plist).read() and not leftovers()
+                      and os.path.exists(os.path.join(ibin, "MARKER")) and os.path.exists(ibin + ".failed") and not os.path.exists(ibin + ".old")
+                      and "release_heartbeat.py" in open(hb_plist).read(), (out[-500:], leftovers()))
+                check("…partially loaded agents are booted out and the previous ones reloaded (checker → heartbeat)",
+                      failed_at is not None and after == ["bootout", "bootout", "bootstrap", "print", "bootstrap", "print"]
+                      and all("bin.new=absent" in c for c in calls), calls)
+                if loaded_kind:
+                    check("…the %s agent that had already loaded was among those booted out" % loaded_kind,
+                          any(c.startswith("bootout") and ".%s" % loaded_kind in c for c in calls[failed_at + 1:]), calls)
+                check("…the fail-once injection was consumed (the rollback's launchctl calls succeeded)", not os.path.exists(fail_file))
+            rc, out = install()
+            check("a clean install afterwards succeeds and replaces the old plists (marker gone, no leftovers)",
+                  rc == 0 and "OLDPLIST" not in open(check_plist).read() and not leftovers() and not os.path.exists(os.path.join(ibin, "MARKER")), out[-300:])
             fake.telegram.clear()
         else:
             print("— installer checks skipped (macOS only) —")
