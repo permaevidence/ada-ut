@@ -49,8 +49,20 @@ class FakeGitHub:
         self.faults = {}   # upload_fail: asset name; patch: "ambiguous"|"fail";
         #                   download_substitute: name -> bytes; latest_override: bytes;
         #                   latest_queue: [bytes, ...] served in order (race simulation);
-        #                   blob_fail: blob pathname whose PUT fails
+        #                   blob_fail: blob pathname whose PUT fails;
+        #                   ref_status: HTTP status forced on the tag-ref lookup;
+        #                   ref_prefix_match: answer the lookup with a DIFFERENT ref name;
+        #                   tag_on_publish: sha the tag gets at publish time regardless
+        #                     of target_commitish (a tag pushed in the race window);
+        #                   ref_flip_after: after that many truthful ref lookups,
+        #                     answer with a different sha (post-publication drift)
         self.created = []  # create-release request bodies (target_commitish pinning)
+        # Git refs: tag name -> {"type": "commit"|"tag", "sha"}; annotated tag
+        # objects: sha -> {"object": {...}}. Like GitHub, a release's tag is
+        # created when the release is PUBLISHED, and only if it does not exist.
+        self.tags = {}
+        self.tag_objects = {}
+        self.ref_lookups = 0
         gh = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -97,6 +109,30 @@ class FakeGitHub:
                 if m:
                     r = gh.releases.get(int(m.group(2)))
                     return self._json(200, self._rel_json(r)) if r else self._json(404, {})
+                m = re.match(r"^/api/repos/([^/]+/[^/]+)/git/ref/tags/([^/]+)$", path)
+                if m:
+                    if not self._auth():
+                        return self._json(401, {"message": "bad token"})
+                    if gh.faults.get("ref_status"):
+                        return self._json(int(gh.faults["ref_status"]), {"message": "injected"})
+                    tag = m.group(2)
+                    if gh.faults.get("ref_prefix_match"):
+                        return self._json(200, {"ref": "refs/tags/%s-rc1" % tag,
+                                                "object": {"type": "commit", "sha": "f" * 40}})
+                    t = gh.tags.get(tag)
+                    if t is None:
+                        return self._json(404, {"message": "Not Found"})
+                    gh.ref_lookups += 1
+                    flip = gh.faults.get("ref_flip_after")
+                    if flip is not None and gh.ref_lookups > flip:
+                        t = {"type": "commit", "sha": "e" * 40}
+                    return self._json(200, {"ref": "refs/tags/" + tag, "object": dict(t)})
+                m = re.match(r"^/api/repos/([^/]+/[^/]+)/git/tags/([0-9a-f]{40})$", path)
+                if m:
+                    if not self._auth():
+                        return self._json(401, {"message": "bad token"})
+                    obj = gh.tag_objects.get(m.group(2))
+                    return self._json(200, obj) if obj else self._json(404, {"message": "Not Found"})
                 m = re.match(r"^/api/repos/([^/]+/[^/]+)/releases$", path)
                 if m:
                     page = int(urllib.parse.parse_qs(parsed.query).get("page", ["1"])[0])
@@ -166,6 +202,13 @@ class FakeGitHub:
                 if body.get("draft") is False:
                     r["draft"] = False
                     r["immutable"] = gh.faults.get("immutable", True)
+                    # GitHub creates the tag now — at target_commitish only if the
+                    # tag does not exist yet (an existing tag is kept untouched).
+                    if gh.faults.get("tag_on_publish"):
+                        gh.tags[r["tag_name"]] = {"type": "commit", "sha": gh.faults["tag_on_publish"]}
+                    elif r["tag_name"] not in gh.tags:
+                        gh.tags[r["tag_name"]] = {"type": "commit",
+                                                  "sha": r.get("target_commitish") or "0" * 40}
                 if mode == "ambiguous":
                     return self._json(502, {"message": "injected: applied but timed out"})
                 self._json(200, self._rel_json(r))
@@ -495,6 +538,76 @@ def main():
         check("newer legacy manifest live → GitHub publishes, Blob left alone",
               rc == 0 and "left alone" in out and gh.latest()["tag_name"] == "v0.7.15"
               and json.loads(gh.blob["app/manifest.json"])["version"] == "9.9.9", out)
+        print("— tag binding (refs API, not target_commitish) —")
+        by_tag_log = {json.loads(l)["tag"]: json.loads(l)["commit"] for l in log_lines()}
+        check("every tag created so far names the commit recorded for its publication",
+              by_tag_log and all(gh.tags.get(t, {}).get("sha") == c for t, c in by_tag_log.items()),
+              {t: (gh.tags.get(t, {}).get("sha"), c) for t, c in by_tag_log.items()})
+        stamp(13, "0.7.16")
+        gh.tags["v0.7.16"] = {"type": "commit", "sha": "a" * 40}
+        before = len(log_lines())
+        rc, out = run()
+        check("pre-existing tag naming ANOTHER commit → refused before the draft, nothing created/recorded",
+              rc != 0 and "not the reviewed HEAD" in out and "(before draft)" in out
+              and not gh.by_tag("v0.7.16") and len(log_lines()) == before, out)
+        gh.tags["v0.7.16"] = {"type": "commit", "sha": head()}
+        rc, out = run()
+        check("pre-existing lightweight tag naming the reviewed HEAD → publishes, tag untouched",
+              rc == 0 and gh.by_tag("v0.7.16") and not gh.by_tag("v0.7.16")["draft"]
+              and gh.tags["v0.7.16"]["sha"] == head() and json.loads(log_lines()[-1])["commit"] == head(), out)
+        stamp(14, "0.7.17")
+        gh.tags["v0.7.17"] = {"type": "tag", "sha": "b" * 40}
+        gh.tag_objects["b" * 40] = {"object": {"type": "tag", "sha": "c" * 40}}
+        gh.tag_objects["c" * 40] = {"object": {"type": "commit", "sha": head()}}
+        rc, out = run()
+        check("pre-existing ANNOTATED tag (nested) resolving to the reviewed HEAD → publishes",
+              rc == 0 and gh.by_tag("v0.7.17") and not gh.by_tag("v0.7.17")["draft"], out)
+        stamp(15, "0.7.18")
+        gh.tags["v0.7.18"] = {"type": "tag", "sha": "b" * 40}
+        gh.tag_objects["c" * 40] = {"object": {"type": "commit", "sha": "a" * 40}}
+        rc, out = run()
+        check("pre-existing annotated tag resolving to ANOTHER commit → refused, nothing created",
+              rc != 0 and "not the reviewed HEAD" in out and not gh.by_tag("v0.7.18"), out)
+        del gh.tags["v0.7.18"]
+        gh.faults["ref_status"] = 500
+        posts_before = len(posts())
+        rc, out = run()
+        check("tag lookup error (HTTP 500) → refused, never treated as absent, nothing created",
+              rc != 0 and "cannot resolve refs/tags/v0.7.18" in out and len(posts()) == posts_before, out)
+        del gh.faults["ref_status"]
+        gh.faults["ref_prefix_match"] = True
+        rc, out = run()
+        check("tag lookup answering a different ref name (prefix match) → refused, nothing created",
+              rc != 0 and "cannot resolve refs/tags/v0.7.18" in out and len(posts()) == posts_before, out)
+        del gh.faults["ref_prefix_match"]
+        gh.faults["tag_on_publish"] = "d" * 40
+        before = len(log_lines())
+        rc, out = run()
+        check("tag created at ANOTHER commit in the publish window → post-publication check fails, NOT recorded",
+              rc != 0 and "(after publish)" in out and "not the reviewed HEAD" in out
+              and gh.by_tag("v0.7.18") and not gh.by_tag("v0.7.18")["draft"]
+              and len(log_lines()) == before and "public state verified" not in out, out)
+        del gh.faults["tag_on_publish"]
+        stamp(16, "0.7.19")
+        gh.ref_lookups = 0
+        gh.faults["ref_flip_after"] = 1   # pre-publish lookups are 404s (uncounted); the inner post-publish lookup is truthful, the outer re-check sees drift
+        before = len(log_lines())
+        rc, out = run()
+        check("tag drift seen only by publish_click.sh's own post-publication re-check → NOT recorded",
+              rc != 0 and "bound to the wrong commit" in out and len(log_lines()) == before
+              and gh.by_tag("v0.7.19") and not gh.by_tag("v0.7.19")["draft"], out)
+        del gh.faults["ref_flip_after"]
+        inner = os.path.join(repo_src, "scripts", "release", "publish-github-release.sh")
+        inner_env = {"GH_TOKEN": "t0k", "REPO": "test/ada-ut", "REF_NAME": "v9.9.9", "VERSION": "9.9.9",
+                     "TITLE": "t", "ASSETS": os.path.join(repo, "manifest.json"), "GH_API_URL": gh.base + "/api"}
+        posts_before = len(posts())
+        p = subprocess.run([inner], capture_output=True, text=True, env={**os.environ, **inner_env})
+        check("publish-github-release.sh without TARGET_COMMITISH refuses",
+              p.returncode != 0 and "TARGET_COMMITISH is required" in p.stdout + p.stderr, p.stdout + p.stderr)
+        p = subprocess.run([inner], capture_output=True, text=True, env={**os.environ, **inner_env, "TARGET_COMMITISH": "main"})
+        check("publish-github-release.sh with a branch name instead of a commit SHA refuses",
+              p.returncode != 0 and "full 40-hex commit SHA" in p.stdout + p.stderr and len(posts()) == posts_before,
+              p.stdout + p.stderr)
         check("every publication in the log is monotonic",
               [json.loads(l)["sequence"] for l in log_lines()] == sorted({json.loads(l)["sequence"] for l in log_lines()}),
               log_lines())

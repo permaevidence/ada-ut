@@ -32,8 +32,12 @@
 # Concurrency: the whole run holds an exclusive cross-process lock (outside
 # the repository; a second publisher is refused, not queued), and the
 # authenticated supersession check is repeated immediately before the
-# release is created. The tag is pinned to the exact reviewed HEAD commit
-# (which must already be on origin/main), never "whatever main is now".
+# release is created. The tag is bound to the exact reviewed HEAD commit
+# (which must already be on origin/main), never "whatever main is now":
+# refs/tags/v<version> is resolved through the Git References API (annotated
+# tags followed) before the draft, before publication and after publication
+# — a pre-existing tag naming any other commit is a refusal, because GitHub
+# keeps an existing tag and silently ignores target_commitish.
 #
 # Env: SIGNING_KEY  private key PEM (default ~/.ada-release-keys/<keyId>.priv.pem
 #                   where keyId is derived from the committed public key)
@@ -333,15 +337,21 @@ cmp -s "$WORK/public.click" "$CLICK" || { echo "✖ the public click differs fro
 REL_STATUS="$(curl -sS -o "$WORK/rel.json" -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
     -H "Accept: application/vnd.github+json" "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null || echo 000)"
 [ "$REL_STATUS" = "200" ] || { echo "✖ cannot read the published release (HTTP $REL_STATUS)"; exit 1; }
-python3 - "$WORK/rel.json" "$RELEASE_ID" "$HEAD_SHA" <<'PYEOF'
+python3 - "$WORK/rel.json" "$RELEASE_ID" <<'PYEOF'
 import json, sys
 rel = json.load(open(sys.argv[1]))
 assert str(rel.get("id")) == sys.argv[2], "release id mismatch"
 assert rel.get("draft") is False, "release is still a draft"
 assert rel.get("immutable") is True, "release is NOT immutable — enable immutable releases on the repository"
-assert rel.get("target_commitish") in (sys.argv[3], None), "release target is not the reviewed HEAD"
 PYEOF
-echo "✔ public state verified: $TAG immutable, envelope + click byte-identical"
+# Independent tag binding check before anything is recorded: the published
+# tag, resolved through the refs API (never the release's target_commitish
+# echo), must name the reviewed HEAD.
+TAG_COMMIT="$(GH_API_URL="$API" "$RELEASE_SCRIPTS/resolve-tag-commit.sh" "$REPO" "$TAG")" || {
+    echo "✖ cannot resolve refs/tags/$TAG after publication — NOT recorded; investigate"; exit 1; }
+[ "$TAG_COMMIT" = "$HEAD_SHA" ] || {
+    echo "✖ refs/tags/$TAG names commit $TAG_COMMIT, not the reviewed HEAD $HEAD_SHA — the published release is bound to the wrong commit; NOT recorded; investigate before anything else"; exit 1; }
+echo "✔ public state verified: $TAG immutable, tag → ${HEAD_SHA:0:12}, envelope + click byte-identical"
 
 # --- 7. record (outside the repository) only after verification
 mkdir -p "$(dirname "$LOG")"

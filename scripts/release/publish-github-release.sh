@@ -8,12 +8,20 @@
 #
 # Env (required): GH_TOKEN, REPO (owner/name), REF_NAME (tag), VERSION,
 #                 TITLE, ASSETS (newline-separated file paths; the LAST one
-#                 must be the signed envelope manifest.sig.json)
+#                 must be the signed envelope manifest.sig.json),
+#                 TARGET_COMMITISH (the exact reviewed commit SHA the tag
+#                 must name)
 # Env (optional): GH_API_URL (default https://api.github.com),
-#                 GH_UPLOADS_URL (default https://uploads.github.com),
-#                 TARGET_COMMITISH (exact commit the tag is created on;
-#                 without it GitHub would tag the default branch's CURRENT
-#                 head — callers publishing reviewed code must pass it)
+#                 GH_UPLOADS_URL (default https://uploads.github.com)
+#
+# Tag binding: target_commitish is only a CREATION hint — GitHub ignores it
+# whenever refs/tags/<REF_NAME> already exists, and the release's echoed
+# target_commitish proves nothing. So the tag is resolved through the Git
+# References API (resolve-tag-commit.sh, annotated tags followed): before
+# the draft is created and again right before publication it must either
+# not exist or already name TARGET_COMMITISH exactly; after publication it
+# must name TARGET_COMMITISH exactly, or this script exits 1 so the caller
+# records nothing and investigates.
 #
 # Exit 0 only when the release is CONFIRMED published (re-read from the API,
 # draft=false). An ambiguous PATCH is re-checked: live → success; still a
@@ -26,8 +34,11 @@ set -euo pipefail
 : "${VERSION:?VERSION is required}"
 : "${TITLE:?TITLE is required}"
 : "${ASSETS:?ASSETS is required}"
+: "${TARGET_COMMITISH:?TARGET_COMMITISH is required (the reviewed commit SHA the tag must name)}"
+[[ "$TARGET_COMMITISH" =~ ^[0-9a-f]{40}$ ]] || { echo "✖ TARGET_COMMITISH must be a full 40-hex commit SHA, not a branch name"; exit 1; }
 API="${GH_API_URL:-https://api.github.com}"
 UPLOADS="${GH_UPLOADS_URL:-https://uploads.github.com}"
+RESOLVE_TAG="$(dirname "$0")/resolve-tag-commit.sh"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -43,6 +54,23 @@ api() {
 jget() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))
 for k in sys.argv[2].split("."): v=v[k]
 print(v)' "$1" "$2"; }
+
+# Tag binding (see header). `require_tag <when> <mode>`: mode absent-or-exact
+# tolerates a missing tag (GitHub creates it at TARGET_COMMITISH on publish);
+# mode exact requires it to exist. Any resolver failure is a refusal.
+require_tag() {
+    local when="$1" mode="$2" tag_commit
+    tag_commit="$(GH_API_URL="$API" "$RESOLVE_TAG" "$REPO" "$REF_NAME")" || {
+        echo "✖ cannot resolve refs/tags/$REF_NAME ($when) — refusing to continue"; exit 1; }
+    if [ "$tag_commit" = "NONE" ]; then
+        [ "$mode" = "absent-or-exact" ] || { echo "✖ refs/tags/$REF_NAME does not exist ($when) although the release is published"; exit 1; }
+        echo "  tag ($when): absent — will be created at ${TARGET_COMMITISH:0:12}"
+        return 0
+    fi
+    [ "$tag_commit" = "$TARGET_COMMITISH" ] || {
+        echo "✖ refs/tags/$REF_NAME already names commit $tag_commit, not the reviewed HEAD $TARGET_COMMITISH ($when) — a pre-existing or stale tag; GitHub would keep it and silently ignore target_commitish. Delete/move the tag only after review, then rerun"; exit 1; }
+    echo "  tag ($when): exists and names the reviewed HEAD ${TARGET_COMMITISH:0:12}"
+}
 
 # Every asset must exist before anything touches the API, envelope last.
 LAST=""
@@ -82,14 +110,16 @@ print("MORE" if len(rel)==100 else "END", file=sys.stderr)' "$BODY_FILE" "$REF_N
     page=$((page + 1))
 done
 
-# 3. Create the draft and address it by ID from here on (a draft cannot be
+# 3. The tag must be absent or already name the reviewed commit — then
+#    create the draft and address it by ID from here on (a draft cannot be
 #    resolved by tag).
+require_tag "before draft" absent-or-exact
 python3 -c 'import json,sys
 req = {"tag_name": sys.argv[1], "draft": True, "name": sys.argv[2] + " " + sys.argv[3],
+  "target_commitish": sys.argv[4],
   "body": "Signed release " + sys.argv[3] + ". Clients authenticate manifest.sig.json with the pinned Ed25519 key before trusting any asset."}
-if sys.argv[4]: req["target_commitish"] = sys.argv[4]
 print(json.dumps(req))' \
-    "$REF_NAME" "$TITLE" "$VERSION" "${TARGET_COMMITISH:-}" > "$WORK/create.json"
+    "$REF_NAME" "$TITLE" "$VERSION" "$TARGET_COMMITISH" > "$WORK/create.json"
 api POST "$API/repos/$REPO/releases" -H "Content-Type: application/json" --data-binary @"$WORK/create.json"
 [ "$STATUS" = "201" ] || { echo "✖ creating the draft release failed (HTTP $STATUS)"; exit 1; }
 RELEASE_ID="$(jget "$BODY_FILE" id)"
@@ -112,8 +142,11 @@ while IFS= read -r asset; do
     upload "$asset"
 done <<< "$ASSETS"
 
-# 5. Atomic go-live; immutability locks at this moment. make_latest is
-#    explicit — never GitHub's default.
+# 5. Last look at the tag (it is created by THIS publish if absent; if it
+#    appeared meanwhile it must already be ours), then atomic go-live;
+#    immutability locks at this moment. make_latest is explicit — never
+#    GitHub's default.
+require_tag "before publish" absent-or-exact
 api PATCH "$API/repos/$REPO/releases/$RELEASE_ID" -H "Content-Type: application/json" \
     --data-binary '{"draft":false,"make_latest":"true"}'
 PATCH_STATUS="$STATUS"
@@ -126,7 +159,10 @@ if [ "$STATUS" = "200" ] && [ "$(jget "$BODY_FILE" draft)" = "False" ] \
     if [ "$PATCH_STATUS" != "200" ]; then
         echo "⚠ publish PATCH answered HTTP $PATCH_STATUS but the release IS published (confirmed by re-read)"
     fi
-    echo "✔ published immutable release $REF_NAME (id $RELEASE_ID)"
+    # 7. The published tag must name the reviewed commit — resolved through
+    #    the refs API, never inferred from the release's target_commitish.
+    require_tag "after publish" exact
+    echo "✔ published immutable release $REF_NAME (id $RELEASE_ID) at commit ${TARGET_COMMITISH:0:12}"
     echo "$RELEASE_ID" > "${RELEASE_ID_OUT:-/dev/null}"
     exit 0
 fi
