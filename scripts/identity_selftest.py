@@ -89,11 +89,8 @@ def main():
     check("publisher: --bootstrap retired (absent live envelope is a refusal)",
           "--bootstrap)" not in publisher and "BOOTSTRAP" not in publisher
           and "bootstrap retired" in publisher)
-    check("publisher: compiled legacy ada-ut descriptor is exact (channel, sequence 1, v0.7.4, old repo path)",
-          'LEGACY_CHANNEL="ada-ut"' in publisher and "LEGACY_SEQUENCE=1" in publisher
-          and 'LEGACY_VERSION="0.7.4"' in publisher
-          and 'LEGACY_ARTIFACT_PREFIX="https://github.com/permaevidence/ada-ut/releases/download/v"' in publisher
-          and "$((LEGACY_SEQUENCE + 1))" in publisher)
+    check("publisher: the rename-transition descriptor is gone (post-transition)",
+          "LEGACY_" not in publisher and "legacy envelope" not in publisher.lower())
     check("app cache/state paths follow the package id",
           "~/.cache/briglia.permaevidence" in read("py/chat_client.py")
           and "~/.cache/briglia.permaevidence" in read("py/voice_record.py")

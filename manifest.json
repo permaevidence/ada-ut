@@ -1,15 +1,15 @@
 {
-    "name": "briglia.permaevidence",
-    "title": "Briglia",
-    "version": "0.8.0",
-    "description": "Chat, installer & control panel for Briglia CLI",
-    "architecture": "all",
-    "maintainer": "Matteo Ianni <iannimatte@gmail.com>",
-    "framework": "ubuntu-touch-24.04-1.x",
-    "hooks": {
-        "briglia": {
-            "apparmor": "click/briglia.apparmor",
-            "desktop": "click/briglia.desktop"
-        }
+  "name": "briglia.permaevidence",
+  "title": "Briglia",
+  "version": "0.8.1",
+  "description": "Chat, installer & control panel for Briglia CLI",
+  "architecture": "all",
+  "maintainer": "Matteo Ianni <iannimatte@gmail.com>",
+  "framework": "ubuntu-touch-24.04-1.x",
+  "hooks": {
+    "briglia": {
+      "apparmor": "click/briglia.apparmor",
+      "desktop": "click/briglia.desktop"
     }
+  }
 }

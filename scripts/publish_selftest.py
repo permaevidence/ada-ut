@@ -318,29 +318,23 @@ def main():
             return False, exc
         return m["sequence"] == seq and m["version"] == version, m
 
-    # The previous identity's last release, exactly as GitHub serves it after
-    # the repository rename: channel ada-ut, sequence 1, v0.7.4, the SAME key
-    # under its old keyId shape, click under the old repository path. Signed
-    # RAW — the production signer refuses the retired channel by design.
-    legacy_key_id = "ada-ut-release-v1-" + key.fingerprint
-    LEGACY_PREFIX = "https://github.com/permaevidence/ada-ut/releases/download/v"
-    legacy_click = b"old-click-bytes"
+    # The channel's existing live state: a briglia-ut sequence-1 release.
+    live1_click = b"live-1-click-bytes"
 
-    def legacy_manifest(**over):
-        fields = dict(channel="ada-ut", version="0.7.4", sequence=1,
-                      url=LEGACY_PREFIX + "0.7.4/ada.permaevidence_0.7.4_all.click",
+    def live1_manifest(**over):
+        fields = dict(channel="briglia-ut", version="0.7.4", sequence=1,
+                      url=gh.base + "/download/v0.7.4/briglia.permaevidence_0.7.4_all.click",
                       platforms=None, schema=1)
         fields.update(over)
         platforms = fields["platforms"]
         if platforms is None:
-            platforms = {"click": {"url": fields["url"], "size": len(legacy_click),
-                                   "sha256": hashlib.sha256(legacy_click).hexdigest()}}
+            platforms = {"click": {"url": fields["url"], "size": len(live1_click),
+                                   "sha256": hashlib.sha256(live1_click).hexdigest()}}
         return manifest_bytes(fields["channel"], fields["version"], fields["sequence"],
                               platforms, schema=fields["schema"])
 
-    def legacy_envelope(payload=None, channel="ada-ut", key_id=None, priv=None):
-        return raw_envelope(priv or key.priv, payload or legacy_manifest(), channel,
-                            key_id or legacy_key_id)
+    def live1_envelope(payload=None):
+        return raw_envelope(key.priv, payload or live1_manifest(), "briglia-ut", key.key_id)
 
     try:
         print("— gates —")
@@ -351,16 +345,15 @@ def main():
         check("--bootstrap is gone: unknown option, nothing posted",
               rc == 2 and "unknown option" in out and not posts(), out)
 
-        # From here on the live state is the legacy v0.7.4 release, and the
-        # source is stamped as the transition release (sequence 2).
-        gh.seed_published("v0.7.4", {"ada.permaevidence_0.7.4_all.click": legacy_click,
-                                     "manifest.json": legacy_manifest(),
-                                     "manifest.sig.json": legacy_envelope()})
+        # From here on the live state is the sequence-1 release and the
+        # source is stamped as sequence 2.
+        gh.seed_published("v0.7.4", {"briglia.permaevidence_0.7.4_all.click": live1_click,
+                                     "manifest.json": live1_manifest(),
+                                     "manifest.sig.json": live1_envelope()})
         stamp(2, "0.7.5")
         rc, out = run("--dry-run")
         check("--dry-run signs + verifies, publishes nothing",
               rc == 0 and "dry run" in out and "the app's verifier" in out and not posts(), out)
-        check("dry run names the legacy floor it stands on", "LEGACY ada-ut envelope" in out, out)
         open(os.path.join(repo, "stray.txt"), "w").write("x")
         rc, out = run()
         check("dirty tree refused", rc != 0 and "not clean" in out and not posts(), out)
@@ -377,64 +370,19 @@ def main():
         check("signing key with loose permissions refused", rc != 0 and "0600" in out, out)
         os.chmod(key.priv, 0o600)
 
-        print("— legacy transition: hostile / wrong live states (nothing may be posted) —")
-
-        def hostile(label, envelope_bytes, expect_text):
-            posts_before = len(posts())
-            gh.faults["latest_override"] = envelope_bytes
-            rc, out = run()
-            del gh.faults["latest_override"]
-            check(label, rc != 0 and expect_text in out and len(posts()) == posts_before, out)
-        hostile("legacy envelope signed by a FOREIGN key → hard stop",
-                legacy_envelope(priv=other.priv, key_id="ada-ut-release-v1-" + other.fingerprint),
-                "hard stop")
-        hostile("legacy-domain envelope whose payload says a different channel → refused",
-                legacy_envelope(payload=legacy_manifest(channel="briglia-ut")), "not a ada-ut schema-1")
-        hostile("legacy envelope with sequence EQUAL to ours (2) → refused (not the compiled state)",
-                legacy_envelope(payload=legacy_manifest(sequence=2)), "not the compiled pre-rename state")
-        hostile("legacy envelope with a HIGHER sequence (7) → refused",
-                legacy_envelope(payload=legacy_manifest(sequence=7)), "not the compiled pre-rename state")
-        hostile("legacy envelope with another version → refused",
-                legacy_envelope(payload=legacy_manifest(version="0.7.3")), "not the compiled pre-rename state")
-        hostile("legacy click outside the old repository path → refused",
-                legacy_envelope(payload=legacy_manifest(
-                    url="https://github.com/someone-else/ada-ut/releases/download/v0.7.4/x.click")),
-                "not under")
-        hostile("legacy manifest with extra platforms → refused (malformed)",
-                legacy_envelope(payload=legacy_manifest(platforms={
-                    "click": {"url": LEGACY_PREFIX + "0.7.4/a.click", "size": 1, "sha256": "ab" * 32},
-                    "linux-arm64": {"url": LEGACY_PREFIX + "0.7.4/b.tar.gz", "size": 1, "sha256": "ab" * 32}})),
-                "malformed")
-        hostile("legacy manifest with schema 2 → refused",
-                legacy_envelope(payload=legacy_manifest(schema=2)), "not a ada-ut schema-1")
-        hostile("legacy-shaped envelope under yet another channel name (ada-cli) → hard stop",
-                raw_envelope(key.priv, legacy_manifest(channel="ada-cli"), "ada-cli",
-                             "ada-cli-release-v1-" + key.fingerprint),
-                "hard stop")
-        hostile("garbage served as the live envelope → hard stop", b"{not json", "hard stop")
-        # Genuine legacy state, but the SOURCE is not the transition release.
-        stamp(3, "0.7.5")
-        rc, out = run()
-        check("authentic legacy floor but source sequence 3 → refused (only sequence 2 may stand on it)",
-              rc != 0 and "only the transition release (sequence 2)" in out and not posts(), out)
-        stamp(1, "0.7.5")
-        rc, out = run()
-        check("authentic legacy floor but source sequence 1 → refused",
-              rc != 0 and "only the transition release (sequence 2)" in out and not posts(), out)
-
-        print("— legacy transition: the one accepted state —")
+        print("— first publish over the live sequence 1 —")
         stamp(2, "0.7.5")
-        # Two supersession reads see the legacy floor; after publication the
-        # latest pointer still serves the legacy envelope twice (GitHub's
+        # Two supersession reads see the live floor; after publication the
+        # latest pointer still serves the previous envelope twice (GitHub's
         # propagation lag, measured live in the Stage-7 rehearsal), then
         # catches up.
-        gh.faults["latest_queue"] = [legacy_envelope()] * 4
+        gh.faults["latest_queue"] = [live1_envelope()] * 4
         rc, out = run()
         rel = gh.by_tag("v0.7.5")
-        check("sequence 2 over the authenticated legacy sequence 1 publishes",
-              rc == 0 and rel is not None and rel["draft"] is False and "LEGACY ada-ut envelope" in out, out)
-        check("latest still serving the legacy envelope after publication is waited out (twice), not treated as a mismatch",
-              out.count("latest still serves the pre-rename legacy envelope") == 2 and "public state verified" in out, out)
+        check("sequence 2 over the authenticated live sequence 1 publishes",
+              rc == 0 and rel is not None and rel["draft"] is False, out)
+        check("latest still serving the previous envelope after publication is waited out (twice), not treated as a mismatch",
+              out.count("latest still serves the previous release") == 2 and "public state verified" in out, out)
         check("assets uploaded in order, envelope last",
               rel and rel["order"] == ["briglia.permaevidence_0.7.5_all.click", "manifest.json", "manifest.sig.json"],
               rel and rel["order"])
@@ -451,12 +399,6 @@ def main():
               any(h[0] == "PATCH" for h in gh.hits))
         check("the tag is pinned to the exact reviewed HEAD commit",
               gh.created and gh.created[-1].get("target_commitish") == head(), gh.created[-1:])
-        # Inert after the transition: a replayed legacy "latest" cannot floor
-        # a later release.
-        stamp(3, "0.7.6")
-        hostile("after the transition, a replayed legacy latest cannot floor sequence 3 → refused",
-                legacy_envelope(), "only the transition release (sequence 2)")
-
         print("— supersession —")
         stamp(2, "0.7.5")
         rc, out = run()
@@ -469,11 +411,6 @@ def main():
         check("latest is now v0.7.5 seq 2", ok)
         rv.TRUST_FILE = os.path.join(root, "trust.json")
         rv.record_accepted(rv.ReleasePolicy("briglia-ut", key.keys(), "", gh.base + "/download/v{version}/", 1), m)
-        gh.faults["latest_override"] = gh.by_tag("v0.7.4")["assets"]["manifest.sig.json"]
-        ok, replayed = verify_public(1, "0.7.4")
-        check("the app's verifier refuses a replayed pre-rename (ada-ut) envelope as wrong-channel",
-              not ok and isinstance(replayed, rv.ReleaseVerifyError) and replayed.kind == "wrong-channel", str(replayed))
-        del gh.faults["latest_override"]
 
         print("— concurrency —")
         stamp(3, "0.7.6", push=False)
@@ -647,7 +584,7 @@ def main():
         check("latest pointer lag: the authenticated previous release seen twice after publish → waited out, then recorded",
               rc == 0 and out.count("latest still serves the previous release") == 2 and len(log_lines()) == before + 1
               and json.loads(log_lines()[-1])["sequence"] == 17, out)
-        foreign_env = raw_envelope(other.priv, legacy_manifest(), "briglia-ut", other.key_id)
+        foreign_env = raw_envelope(other.priv, live1_manifest(), "briglia-ut", other.key_id)
         stamp(18, "0.7.21")
         gh.faults["latest_queue"] = [gh.by_tag("v0.7.20")["assets"]["manifest.sig.json"]] * 2 + [foreign_env]
         before = len(log_lines())

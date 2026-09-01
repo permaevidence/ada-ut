@@ -12,11 +12,7 @@
 #      key and carry a strictly lower sequence. An absent live envelope is a
 #      refusal — the signed app channel was bootstrapped once (v0.7.4,
 #      2026-08-31) and never restarts from nothing; an invalid live envelope
-#      is a hard stop, never "absent". Rename transition (RENAME_PLAN.md
-#      §3.2): until the first Briglia release publishes, the renamed
-#      repository's "latest" is still the previous identity's envelope; a
-#      compiled legacy descriptor below accepts EXACTLY that state, for the
-#      transition release only;
+#      is a hard stop, never "absent";
 #   4. manifest → sign with the LOCAL app key (never on argv, never printed)
 #      → verify with the committed public key AND with the app's own Python
 #      verifier (what the phone will run);
@@ -113,63 +109,16 @@ SIGNING_KEY="${SIGNING_KEY:-$HOME/.briglia-release-keys/$KEYID.priv.pem}"
 PERM="$(python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$SIGNING_KEY")"
 [ "$PERM" = "600" ] || { echo "✖ signing key $SIGNING_KEY must be mode 0600 (is $PERM)"; exit 1; }
 
-# --- legacy-transition descriptor (RENAME_PLAN.md §3.2 / §5). After the
-# repository rename, GitHub's "latest" is still the previous identity's
-# envelope until the first Briglia click publishes: channel `ada-ut`,
-# sequence 1, version 0.7.4, keyId `ada-ut-release-v1-…` over the SAME key
-# material, click under the old repository path. It is accepted as the
-# supersession floor ONLY when it authenticates with the committed key under
-# the old channel domain AND matches this descriptor EXACTLY AND the release
-# being published is the transition release (sequence LEGACY+1 = 2). No
-# environment override, no bypass flag. This block is deleted in the
-# follow-up commit once v0.8.0 is live (a later release supersedes a
-# briglia-ut envelope, so the path is inert by construction from then on).
-LEGACY_CHANNEL="ada-ut"
-LEGACY_SEQUENCE=1
-LEGACY_VERSION="0.7.4"
-LEGACY_ARTIFACT_PREFIX="https://github.com/permaevidence/ada-ut/releases/download/v"
-
-# Exact-descriptor check of an AUTHENTICATED legacy payload: field for field
-# the genuine pre-rename channel state, nothing else (not a wildcard).
-legacy_payload_matches() {
-    python3 - "$1" "$LEGACY_CHANNEL" "$LEGACY_SEQUENCE" "$LEGACY_VERSION" "$LEGACY_ARTIFACT_PREFIX" <<'PYCHECK'
-import json, sys
-path, channel, sequence, version, prefix = sys.argv[1:6]
-try:
-    m = json.load(open(path))
-except Exception:
-    sys.exit("✖ legacy envelope authenticates but its payload is not JSON — refusing")
-if not isinstance(m, dict) or m.get("schema") != 1 or m.get("channel") != channel:
-    sys.exit("✖ legacy envelope authenticates but its payload is not a %s schema-1 manifest — refusing" % channel)
-if m.get("sequence") != int(sequence) or m.get("version") != version:
-    sys.exit("✖ legacy envelope is not the compiled pre-rename state (sequence %s, version %s): got sequence %r version %r — refusing"
-             % (sequence, version, m.get("sequence"), m.get("version")))
-platforms = m.get("platforms")
-if not isinstance(platforms, dict) or set(platforms) != {"click"}:
-    sys.exit("✖ legacy manifest is malformed (expected exactly one 'click' platform) — refusing")
-entry = platforms["click"]
-url = entry.get("url") if isinstance(entry, dict) else None
-if not isinstance(url, str) or not url.startswith(prefix + version + "/"):
-    sys.exit("✖ legacy manifest click is not under %s%s/ — refusing" % (prefix, version))
-PYCHECK
-}
-
-# --- authenticated live-channel read: sets LIVE_STATUS, LIVE_KIND
-# (current|legacy), LIVE_SEQ, LIVE_VER, LIVE_PAYLOAD (path). Anything served
+# --- authenticated live-channel read: sets LIVE_STATUS, LIVE_SEQ,
+# LIVE_VER, LIVE_PAYLOAD (path). Anything served
 # that does not authenticate is a hard stop — never "absent".
 read_live() {
     LIVE_STATUS="$(curl -sSL --max-filesize 131072 -o "$WORK/live.sig.json" -w '%{http_code}' "$LIVE_URL" 2>/dev/null || echo 000)"
-    LIVE_SEQ=""; LIVE_VER=""; LIVE_KIND=""; LIVE_PAYLOAD="$WORK/live-payload.json"
+    LIVE_SEQ=""; LIVE_VER=""; LIVE_PAYLOAD="$WORK/live-payload.json"
     case "$LIVE_STATUS" in
         200)
-            if "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/live.sig.json" "$EXPECTED_PUB" "$CHANNEL" "$LIVE_PAYLOAD" >/dev/null 2>&1; then
-                LIVE_KIND="current"
-            elif "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/live.sig.json" "$EXPECTED_PUB" "$LEGACY_CHANNEL" "$LIVE_PAYLOAD" >/dev/null 2>&1; then
-                LIVE_KIND="legacy"
-                legacy_payload_matches "$LIVE_PAYLOAD" || exit 1
-            else
-                echo "✖ the LIVE envelope does not authenticate against the committed key (neither as $CHANNEL nor as the compiled legacy $LEGACY_CHANNEL descriptor) — hard stop (never treated as absent)"; exit 1
-            fi
+            "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/live.sig.json" "$EXPECTED_PUB" "$CHANNEL" "$LIVE_PAYLOAD" >/dev/null 2>&1 || {
+                echo "✖ the LIVE envelope does not authenticate against the committed key — hard stop (never treated as absent)"; exit 1; }
             LIVE_SEQ="$(python3 -c "import json;print(json.load(open('$LIVE_PAYLOAD'))['sequence'])")"
             LIVE_VER="$(python3 -c "import json;print(json.load(open('$LIVE_PAYLOAD'))['version'])")"
             [[ "$LIVE_SEQ" =~ ^[1-9][0-9]*$ ]] || { echo "✖ live sequence '$LIVE_SEQ' is not a positive integer"; exit 1; }
@@ -189,15 +138,7 @@ read_live() {
 check_supersession() {
     local when="$1"
     read_live
-    if [ "$LIVE_KIND" = "legacy" ]; then
-        echo "  live ($when): v$LIVE_VER sequence $LIVE_SEQ (LEGACY $LEGACY_CHANNEL envelope — pre-rename channel state)"
-        # Only the transition release may stand on the legacy floor: exactly
-        # the next sequence. Anything later must supersede a $CHANNEL envelope.
-        [ "$SEQUENCE" -eq $((LEGACY_SEQUENCE + 1)) ] || {
-            echo "✖ ($when) only the transition release (sequence $((LEGACY_SEQUENCE + 1))) may supersede the legacy $LEGACY_CHANNEL envelope — source sequence is $SEQUENCE; a $CHANNEL release must be live first"; exit 1; }
-    else
-        echo "  live ($when): v$LIVE_VER sequence $LIVE_SEQ"
-    fi
+    echo "  live ($when): v$LIVE_VER sequence $LIVE_SEQ"
     [ "$SEQUENCE" -gt "$LIVE_SEQ" ] || {
         echo "✖ superseded ($when): sequence $SEQUENCE is not greater than live $LIVE_SEQ — bump APP_RELEASE_SEQUENCE"; exit 1; }
 }
@@ -310,9 +251,8 @@ RELEASE_ID="$(cat "$WORK/release-id")"
 # pointer lags a just-published release by up to a couple of minutes
 # (measured in the Stage-7 rehearsal, 2026-09-01: the release was live and
 # immutable while latest/download still served the previous envelope). An
-# AUTHENTICATED previous state — the release we just superseded, or the
-# pre-rename legacy envelope during the transition — means "not yet", and we
-# wait, bounded. Anything else served is a hard stop, never waited out; and
+# AUTHENTICATED previous state — the release we just superseded — means
+# "not yet", and we wait, bounded. Anything else served is a hard stop, never waited out; and
 # a hard stop here leaves the release live but NOT recorded, so the message
 # says so.
 fetch_public() {  # url out
@@ -335,9 +275,6 @@ while :; do
         [[ "$PUB_SEQ" =~ ^[1-9][0-9]*$ ]] && [ "$PUB_SEQ" -lt "$SEQUENCE" ] || {
             echo "✖ the public LATEST envelope authenticates but is NOT this release (v$PUB_VER sequence $PUB_SEQ; ours v$VERSION sequence $SEQUENCE) — a sibling publication got ahead; release $RELEASE_ID is live but NOT recorded; investigate before anything else"; exit 1; }
         WHAT="the previous release (authenticated v$PUB_VER, sequence $PUB_SEQ)"
-    elif "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/public.sig.json" "$EXPECTED_PUB" "$LEGACY_CHANNEL" "$WORK/public-payload.json" >/dev/null 2>&1 \
-         && legacy_payload_matches "$WORK/public-payload.json" >/dev/null 2>&1; then
-        WHAT="the pre-rename legacy envelope"
     else
         echo "✖ the public LATEST envelope is neither this release nor an authenticated previous state — release $RELEASE_ID is live but NOT recorded; investigate before anything else"; exit 1
     fi
