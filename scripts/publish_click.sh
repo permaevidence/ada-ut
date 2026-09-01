@@ -2,16 +2,21 @@
 # Publish a built .click as an IMMUTABLE, SIGNED GitHub Release of
 # permaevidence/briglia-ut (docs: briglia-cli RELEASE_SIGNING_PLAN.md §9.3).
 #
-#   scripts/publish_click.sh [--bootstrap] [--dry-run] [--allow-dirty] [version]
+#   scripts/publish_click.sh [--dry-run] [--allow-dirty] [version]
 #
 # Flow (every step fails closed):
 #   1. source state: clean tree, version == manifest.json, exact SemVer,
 #      sequence == py/release_verify.py APP_RELEASE_SEQUENCE;
 #   2. deterministic click build (scripts/build_click.py);
 #   3. supersession: the LIVE envelope must authenticate with the committed
-#      key and carry a strictly lower sequence — or be absent, which only
-#      --bootstrap (the one-time first signed release) may accept; an invalid
-#      live envelope is a hard stop, never "absent";
+#      key and carry a strictly lower sequence. An absent live envelope is a
+#      refusal — the signed app channel was bootstrapped once (v0.7.4,
+#      2026-08-31) and never restarts from nothing; an invalid live envelope
+#      is a hard stop, never "absent". Rename transition (RENAME_PLAN.md
+#      §3.2): until the first Briglia release publishes, the renamed
+#      repository's "latest" is still the previous identity's envelope; a
+#      compiled legacy descriptor below accepts EXACTLY that state, for the
+#      transition release only;
 #   4. manifest → sign with the LOCAL app key (never on argv, never printed)
 #      → verify with the committed public key AND with the app's own Python
 #      verifier (what the phone will run);
@@ -64,10 +69,9 @@ os.execv("/bin/bash", ["/bin/bash", script] + args)
 PYEOF
 fi
 
-BOOTSTRAP=0; DRY_RUN=0; ALLOW_DIRTY=0; VERSION_ARG=""
+DRY_RUN=0; ALLOW_DIRTY=0; VERSION_ARG=""
 for arg in "$@"; do
     case "$arg" in
-        --bootstrap) BOOTSTRAP=1;;
         --dry-run) DRY_RUN=1;;
         --allow-dirty) ALLOW_DIRTY=1;;
         --*) echo "✖ unknown option $arg"; exit 2;;
@@ -106,20 +110,73 @@ SIGNING_KEY="${SIGNING_KEY:-$HOME/.briglia-release-keys/$KEYID.priv.pem}"
 PERM="$(stat -f %Lp "$SIGNING_KEY" 2>/dev/null || stat -c %a "$SIGNING_KEY")"
 [ "$PERM" = "600" ] || { echo "✖ signing key $SIGNING_KEY must be mode 0600 (is $PERM)"; exit 1; }
 
-# --- authenticated live-channel read: sets LIVE_STATUS, LIVE_SEQ, LIVE_VER,
-# LIVE_PAYLOAD (path). Anything served that does not authenticate is a
-# hard stop — never "absent".
+# --- legacy-transition descriptor (RENAME_PLAN.md §3.2 / §5). After the
+# repository rename, GitHub's "latest" is still the previous identity's
+# envelope until the first Briglia click publishes: channel `ada-ut`,
+# sequence 1, version 0.7.4, keyId `ada-ut-release-v1-…` over the SAME key
+# material, click under the old repository path. It is accepted as the
+# supersession floor ONLY when it authenticates with the committed key under
+# the old channel domain AND matches this descriptor EXACTLY AND the release
+# being published is the transition release (sequence LEGACY+1 = 2). No
+# environment override, no bypass flag. This block is deleted in the
+# follow-up commit once v0.8.0 is live (a later release supersedes a
+# briglia-ut envelope, so the path is inert by construction from then on).
+LEGACY_CHANNEL="ada-ut"
+LEGACY_SEQUENCE=1
+LEGACY_VERSION="0.7.4"
+LEGACY_ARTIFACT_PREFIX="https://github.com/permaevidence/ada-ut/releases/download/v"
+
+# Exact-descriptor check of an AUTHENTICATED legacy payload: field for field
+# the genuine pre-rename channel state, nothing else (not a wildcard).
+legacy_payload_matches() {
+    python3 - "$1" "$LEGACY_CHANNEL" "$LEGACY_SEQUENCE" "$LEGACY_VERSION" "$LEGACY_ARTIFACT_PREFIX" <<'PYCHECK'
+import json, sys
+path, channel, sequence, version, prefix = sys.argv[1:6]
+try:
+    m = json.load(open(path))
+except Exception:
+    sys.exit("✖ legacy envelope authenticates but its payload is not JSON — refusing")
+if not isinstance(m, dict) or m.get("schema") != 1 or m.get("channel") != channel:
+    sys.exit("✖ legacy envelope authenticates but its payload is not a %s schema-1 manifest — refusing" % channel)
+if m.get("sequence") != int(sequence) or m.get("version") != version:
+    sys.exit("✖ legacy envelope is not the compiled pre-rename state (sequence %s, version %s): got sequence %r version %r — refusing"
+             % (sequence, version, m.get("sequence"), m.get("version")))
+platforms = m.get("platforms")
+if not isinstance(platforms, dict) or set(platforms) != {"click"}:
+    sys.exit("✖ legacy manifest is malformed (expected exactly one 'click' platform) — refusing")
+entry = platforms["click"]
+url = entry.get("url") if isinstance(entry, dict) else None
+if not isinstance(url, str) or not url.startswith(prefix + version + "/"):
+    sys.exit("✖ legacy manifest click is not under %s%s/ — refusing" % (prefix, version))
+PYCHECK
+}
+
+# --- authenticated live-channel read: sets LIVE_STATUS, LIVE_KIND
+# (current|legacy), LIVE_SEQ, LIVE_VER, LIVE_PAYLOAD (path). Anything served
+# that does not authenticate is a hard stop — never "absent".
 read_live() {
     LIVE_STATUS="$(curl -sSL --max-filesize 131072 -o "$WORK/live.sig.json" -w '%{http_code}' "$LIVE_URL" 2>/dev/null || echo 000)"
-    LIVE_SEQ=""; LIVE_VER=""; LIVE_PAYLOAD="$WORK/live-payload.json"
+    LIVE_SEQ=""; LIVE_VER=""; LIVE_KIND=""; LIVE_PAYLOAD="$WORK/live-payload.json"
     case "$LIVE_STATUS" in
         200)
-            "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/live.sig.json" "$EXPECTED_PUB" "$CHANNEL" "$LIVE_PAYLOAD" >/dev/null || {
-                echo "✖ the LIVE envelope does not authenticate against the committed key — hard stop (never treated as absent)"; exit 1; }
+            if "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/live.sig.json" "$EXPECTED_PUB" "$CHANNEL" "$LIVE_PAYLOAD" >/dev/null 2>&1; then
+                LIVE_KIND="current"
+            elif "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/live.sig.json" "$EXPECTED_PUB" "$LEGACY_CHANNEL" "$LIVE_PAYLOAD" >/dev/null 2>&1; then
+                LIVE_KIND="legacy"
+                legacy_payload_matches "$LIVE_PAYLOAD" || exit 1
+            else
+                echo "✖ the LIVE envelope does not authenticate against the committed key (neither as $CHANNEL nor as the compiled legacy $LEGACY_CHANNEL descriptor) — hard stop (never treated as absent)"; exit 1
+            fi
             LIVE_SEQ="$(python3 -c "import json;print(json.load(open('$LIVE_PAYLOAD'))['sequence'])")"
             LIVE_VER="$(python3 -c "import json;print(json.load(open('$LIVE_PAYLOAD'))['version'])")"
+            [[ "$LIVE_SEQ" =~ ^[1-9][0-9]*$ ]] || { echo "✖ live sequence '$LIVE_SEQ' is not a positive integer"; exit 1; }
             ;;
-        404) ;;
+        404)
+            # Fail closed forever: the signed app channel was bootstrapped
+            # once (v0.7.4) — a missing live envelope means an outage or a
+            # deleted release, and publishing waits; it never restarts from
+            # nothing (there is no --bootstrap any more).
+            echo "✖ no live signed release reachable at $LIVE_URL — refusing (bootstrap retired after v0.7.4; publishing never restarts from nothing)"; exit 1;;
         *)  echo "✖ cannot read the live envelope (HTTP $LIVE_STATUS) — refusing to guess"; exit 1;;
     esac
 }
@@ -129,16 +186,17 @@ read_live() {
 check_supersession() {
     local when="$1"
     read_live
-    if [ "$LIVE_STATUS" = "200" ]; then
-        echo "  live ($when): v$LIVE_VER sequence $LIVE_SEQ"
-        [ "$SEQUENCE" -gt "$LIVE_SEQ" ] || {
-            echo "✖ superseded ($when): sequence $SEQUENCE is not greater than live $LIVE_SEQ — bump APP_RELEASE_SEQUENCE"; exit 1; }
-        [ "$BOOTSTRAP" = 0 ] || { echo "✖ --bootstrap given but a live signed release exists"; exit 1; }
+    if [ "$LIVE_KIND" = "legacy" ]; then
+        echo "  live ($when): v$LIVE_VER sequence $LIVE_SEQ (LEGACY $LEGACY_CHANNEL envelope — pre-rename channel state)"
+        # Only the transition release may stand on the legacy floor: exactly
+        # the next sequence. Anything later must supersede a $CHANNEL envelope.
+        [ "$SEQUENCE" -eq $((LEGACY_SEQUENCE + 1)) ] || {
+            echo "✖ ($when) only the transition release (sequence $((LEGACY_SEQUENCE + 1))) may supersede the legacy $LEGACY_CHANNEL envelope — source sequence is $SEQUENCE; a $CHANNEL release must be live first"; exit 1; }
     else
-        [ "$BOOTSTRAP" = 1 ] || {
-            echo "✖ no live signed release reachable at $LIVE_URL — only the one-time first signed release may proceed, with --bootstrap"; exit 1; }
-        echo "  live ($when): none (bootstrap accepted)"
+        echo "  live ($when): v$LIVE_VER sequence $LIVE_SEQ"
     fi
+    [ "$SEQUENCE" -gt "$LIVE_SEQ" ] || {
+        echo "✖ superseded ($when): sequence $SEQUENCE is not greater than live $LIVE_SEQ — bump APP_RELEASE_SEQUENCE"; exit 1; }
 }
 
 # --- 1. source state

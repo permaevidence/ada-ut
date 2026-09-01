@@ -20,20 +20,34 @@ REPO_ROOT = os.path.dirname(HERE)
 RELEASE_SCRIPTS = os.path.join(HERE, "release")
 
 
+# The channels the production key/sign scripts accept. Any other channel
+# name (the retired `ada-cli` / `ada-ut`, or a hostile fixture) is refused
+# by those scripts, so the fixture generates and signs such keys DIRECTLY
+# with openssl — tests may forge pre-rename or foreign envelopes; the
+# production tooling never can.
+PRODUCTION_CHANNELS = ("briglia-cli", "briglia-ut")
+
+
 class TestKey:
     """One generated key pair for a channel, living in a temp dir."""
 
     def __init__(self, channel):
         self.channel = channel
         self.dir = tempfile.mkdtemp(prefix="briglia-ut-testkey-")
-        subprocess.run([os.path.join(RELEASE_SCRIPTS, "release-keygen.sh"),
-                        channel, self.dir], check=True, capture_output=True,
-                       env=dict(os.environ, PATH=_ORIG_PATH))
-        record = next(f for f in os.listdir(self.dir) if f.endswith(".json"))
-        with open(os.path.join(self.dir, record)) as f:
-            data = json.load(f)
+        if channel in PRODUCTION_CHANNELS:
+            subprocess.run([os.path.join(RELEASE_SCRIPTS, "release-keygen.sh"),
+                            channel, self.dir], check=True, capture_output=True,
+                           env=dict(os.environ, PATH=_ORIG_PATH))
+            record = next(f for f in os.listdir(self.dir) if f.endswith(".json"))
+            with open(os.path.join(self.dir, record)) as f:
+                data = json.load(f)
+        else:
+            data = _raw_keygen(channel, self.dir)
         self.key_id = data["keyId"]
         self.pub_hex = data["publicKeyHex"]
+        # `<channel>-release-v1-<fingerprint16>` — the suffix is the key's
+        # identity; tests re-derive it under another channel name.
+        self.fingerprint = self.key_id.rsplit("-", 1)[1]
         self.priv = os.path.join(self.dir, self.key_id + ".priv.pem")
         self.pub = os.path.join(self.dir, self.key_id + ".pub.pem")
 
@@ -41,8 +55,12 @@ class TestKey:
         return {self.key_id: self.pub_hex}
 
     def sign(self, manifest_bytes, channel=None):
-        """Envelope bytes for EXACT manifest bytes via sign-envelope.sh."""
+        """Envelope bytes for EXACT manifest bytes via sign-envelope.sh (the
+        production signer) — or, for a channel the production signer refuses,
+        via the raw openssl path with this key's keyId shape."""
         channel = channel or self.channel
+        if channel not in PRODUCTION_CHANNELS:
+            return raw_envelope(self.priv, manifest_bytes, channel, self.key_id)
         work = tempfile.mkdtemp(prefix="briglia-ut-sign-")
         try:
             manifest_path = os.path.join(work, "manifest.json")
@@ -62,6 +80,82 @@ class TestKey:
                 except OSError:
                     pass
             os.rmdir(work)
+
+
+def _resolve_openssl():
+    """The Ed25519-capable openssl the release scripts themselves resolve."""
+    out = subprocess.run(
+        ["bash", "-c", '. "%s/openssl-resolve.sh" && resolve_openssl && printf "%%s" "$OPENSSL"'
+         % RELEASE_SCRIPTS],
+        check=True, capture_output=True, text=True,
+        env=dict(os.environ, PATH=_ORIG_PATH)).stdout.strip()
+    if not out:
+        raise RuntimeError("no Ed25519-capable openssl found")
+    return out
+
+
+def _raw_keygen(channel, out_dir):
+    """Mirror of release-keygen.sh for channels it refuses: same file
+    layout (<keyId>.priv.pem / .pub.pem / .json), same keyId derivation
+    (channel-release-v1-<first 16 hex of sha256(raw pub))."""
+    import hashlib
+    openssl = _resolve_openssl()
+    env = dict(os.environ, PATH=_ORIG_PATH)
+    tmp_priv = os.path.join(out_dir, ".keygen-tmp.pem")
+    subprocess.run([openssl, "genpkey", "-algorithm", "ed25519", "-out", tmp_priv],
+                   check=True, capture_output=True, env=env)
+    der = subprocess.run([openssl, "pkey", "-in", tmp_priv, "-pubout", "-outform", "DER"],
+                         check=True, capture_output=True, env=env).stdout
+    raw = der[-32:]
+    fingerprint = hashlib.sha256(raw).hexdigest()
+    key_id = "%s-release-v1-%s" % (channel, fingerprint[:16])
+    priv = os.path.join(out_dir, key_id + ".priv.pem")
+    os.rename(tmp_priv, priv)
+    os.chmod(priv, 0o600)
+    subprocess.run([openssl, "pkey", "-in", priv, "-pubout", "-out",
+                    os.path.join(out_dir, key_id + ".pub.pem")],
+                   check=True, capture_output=True, env=env)
+    data = {"keyId": key_id, "channel": channel, "publicKeyHex": raw.hex(),
+            "fingerprintSHA256": fingerprint}
+    with open(os.path.join(out_dir, key_id + ".json"), "w") as f:
+        json.dump(data, f, indent=2)
+    return data
+
+
+def raw_envelope(priv_pem, payload_bytes, channel, key_id, fmt="ada-release-envelope-v1"):
+    """Envelope bytes signed DIRECTLY with openssl over the documented
+    domain input — bypassing sign-envelope.sh on purpose, so tests can
+    produce envelopes the production signer refuses to make: a retired
+    channel name (the pre-rename `ada-ut` live state), a foreign keyId
+    shape, a wrong format. Used for transition and hostile fixtures only."""
+    import base64
+    work = tempfile.mkdtemp(prefix="briglia-ut-rawsign-")
+    try:
+        message = (fmt.encode() + b"\0" + channel.encode() + b"\0"
+                   + key_id.encode() + b"\0" + payload_bytes)
+        msg_path = os.path.join(work, "input")
+        sig_path = os.path.join(work, "sig")
+        with open(msg_path, "wb") as f:
+            f.write(message)
+        subprocess.run([_resolve_openssl(), "pkeyutl", "-sign", "-rawin", "-inkey", priv_pem,
+                        "-in", msg_path, "-out", sig_path],
+                       check=True, capture_output=True, env=dict(os.environ, PATH=_ORIG_PATH))
+        with open(sig_path, "rb") as f:
+            signature = f.read()
+        return json.dumps({
+            "format": fmt,
+            "channel": channel,
+            "keyId": key_id,
+            "payload": base64.b64encode(payload_bytes).decode(),
+            "signature": base64.b64encode(signature).decode(),
+        }, indent=2, sort_keys=True).encode()
+    finally:
+        for name in ("input", "sig"):
+            try:
+                os.unlink(os.path.join(work, name))
+            except OSError:
+                pass
+        os.rmdir(work)
 
 
 def manifest_bytes(channel, version, sequence, platforms, published=None,

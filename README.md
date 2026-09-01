@@ -172,7 +172,19 @@ then records the publication. It holds an exclusive cross-process lock,
 repeats the supersession check right before the release is created, and
 binds the tag to the exact reviewed HEAD commit (which must already be on
 `origin/main`). Every release bumps `APP_RELEASE_SEQUENCE` in
-`py/release_verify.py` together with `manifest.json`'s version.
+`py/release_verify.py` together with `manifest.json`'s version. There is no
+bootstrap mode: the signed app channel was bootstrapped once (v0.7.4,
+2026-08-31) and an absent live envelope is a refusal, never a fresh start.
+
+Rename transition: after the repository rename, GitHub's "latest" is still
+the previous identity's envelope (channel `ada-ut`, sequence 1, v0.7.4, the
+same key under its old key ID). The publisher carries a compiled legacy
+descriptor that accepts exactly that state — authenticated with the
+committed key under the old channel domain, field for field — and only for
+the transition release (sequence 2). Every other legacy shape (foreign key,
+other sequence or version, click outside the old repository path, extra
+platforms, other channel) is a refusal, and once a `briglia-ut` release is
+live the path is inert; the block is deleted right after v0.8.0 publishes.
 
 `scripts/release_watch.py` / `scripts/release_heartbeat.py` /
 `scripts/install_release_watch.sh` are the deterministic release-channel

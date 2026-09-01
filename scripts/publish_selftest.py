@@ -22,7 +22,7 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "py"))
-from signing_fixture import TestKey  # noqa: E402
+from signing_fixture import TestKey, manifest_bytes, raw_envelope  # noqa: E402
 import release_verify as rv  # noqa: E402
 
 PASSED = FAILED = 0
@@ -222,6 +222,17 @@ class FakeGitHub:
         published = [r for r in self.releases.values() if not r["draft"]]
         return published[-1] if published else None
 
+    def seed_published(self, tag, assets, sha="1" * 40):
+        """A release that already exists and is live — e.g. the previous
+        identity's last release, which this publisher never created."""
+        rid = self.next_id
+        self.next_id += 1
+        self.releases[rid] = {"id": rid, "tag_name": tag, "draft": False, "name": tag,
+                              "immutable": True, "assets": dict(assets),
+                              "order": list(assets), "target_commitish": sha}
+        self.tags[tag] = {"type": "commit", "sha": sha}
+        return self.releases[rid]
+
     def by_tag(self, tag):
         return next((r for r in self.releases.values() if r["tag_name"] == tag), None)
 
@@ -307,70 +318,154 @@ def main():
             return False, exc
         return m["sequence"] == seq and m["version"] == version, m
 
+    # The previous identity's last release, exactly as GitHub serves it after
+    # the repository rename: channel ada-ut, sequence 1, v0.7.4, the SAME key
+    # under its old keyId shape, click under the old repository path. Signed
+    # RAW — the production signer refuses the retired channel by design.
+    legacy_key_id = "ada-ut-release-v1-" + key.fingerprint
+    LEGACY_PREFIX = "https://github.com/permaevidence/ada-ut/releases/download/v"
+    legacy_click = b"old-click-bytes"
+
+    def legacy_manifest(**over):
+        fields = dict(channel="ada-ut", version="0.7.4", sequence=1,
+                      url=LEGACY_PREFIX + "0.7.4/ada.permaevidence_0.7.4_all.click",
+                      platforms=None, schema=1)
+        fields.update(over)
+        platforms = fields["platforms"]
+        if platforms is None:
+            platforms = {"click": {"url": fields["url"], "size": len(legacy_click),
+                                   "sha256": hashlib.sha256(legacy_click).hexdigest()}}
+        return manifest_bytes(fields["channel"], fields["version"], fields["sequence"],
+                              platforms, schema=fields["schema"])
+
+    def legacy_envelope(payload=None, channel="ada-ut", key_id=None, priv=None):
+        return raw_envelope(priv or key.priv, payload or legacy_manifest(), channel,
+                            key_id or legacy_key_id)
+
     try:
         print("— gates —")
         rc, out = run()
-        check("no live release + no --bootstrap → refused, nothing posted",
-              rc != 0 and "only the one-time first signed release" in out and not posts(), out)
-        rc, out = run("--bootstrap", "--dry-run")
+        check("no live release → refused (bootstrap retired), nothing posted",
+              rc != 0 and "bootstrap retired" in out and not posts(), out)
+        rc, out = run("--bootstrap")
+        check("--bootstrap is gone: unknown option, nothing posted",
+              rc == 2 and "unknown option" in out and not posts(), out)
+
+        # From here on the live state is the legacy v0.7.4 release, and the
+        # source is stamped as the transition release (sequence 2).
+        gh.seed_published("v0.7.4", {"ada.permaevidence_0.7.4_all.click": legacy_click,
+                                     "manifest.json": legacy_manifest(),
+                                     "manifest.sig.json": legacy_envelope()})
+        stamp(2, "0.7.5")
+        rc, out = run("--dry-run")
         check("--dry-run signs + verifies, publishes nothing",
               rc == 0 and "dry run" in out and "the app's verifier" in out and not posts(), out)
+        check("dry run names the legacy floor it stands on", "LEGACY ada-ut envelope" in out, out)
         open(os.path.join(repo, "stray.txt"), "w").write("x")
-        rc, out = run("--bootstrap")
+        rc, out = run()
         check("dirty tree refused", rc != 0 and "not clean" in out and not posts(), out)
-        rc, out = run("--bootstrap", "--dry-run", "--allow-dirty")
+        rc, out = run("--dry-run", "--allow-dirty")
         check("--allow-dirty lets a dry run through", rc == 0, out)
         os.unlink(os.path.join(repo, "stray.txt"))
-        rc, out = run("--bootstrap", "0.9.9")
+        rc, out = run("0.9.9")
         check("version argument != manifest.json refused", rc != 0 and "!= manifest.json" in out, out)
-        rc, out = run("--bootstrap", EXPECTED_PUB=other.pub, SIGNING_KEY=other.priv)
+        rc, out = run(EXPECTED_PUB=other.pub, SIGNING_KEY=other.priv)
         check("committed key not pinned in release_verify.py → refused",
               rc != 0 and "does not pin" in out and not posts(), out)
         os.chmod(key.priv, 0o644)
-        rc, out = run("--bootstrap")
+        rc, out = run()
         check("signing key with loose permissions refused", rc != 0 and "0600" in out, out)
         os.chmod(key.priv, 0o600)
 
-        print("— bootstrap publish —")
-        rc, out = run("--bootstrap")
-        rel = gh.by_tag("v0.7.4")
-        check("--bootstrap publishes v0.7.4", rc == 0 and rel is not None and rel["draft"] is False, out)
+        print("— legacy transition: hostile / wrong live states (nothing may be posted) —")
+
+        def hostile(label, envelope_bytes, expect_text):
+            posts_before = len(posts())
+            gh.faults["latest_override"] = envelope_bytes
+            rc, out = run()
+            del gh.faults["latest_override"]
+            check(label, rc != 0 and expect_text in out and len(posts()) == posts_before, out)
+        hostile("legacy envelope signed by a FOREIGN key → hard stop",
+                legacy_envelope(priv=other.priv, key_id="ada-ut-release-v1-" + other.fingerprint),
+                "hard stop")
+        hostile("legacy-domain envelope whose payload says a different channel → refused",
+                legacy_envelope(payload=legacy_manifest(channel="briglia-ut")), "not a ada-ut schema-1")
+        hostile("legacy envelope with sequence EQUAL to ours (2) → refused (not the compiled state)",
+                legacy_envelope(payload=legacy_manifest(sequence=2)), "not the compiled pre-rename state")
+        hostile("legacy envelope with a HIGHER sequence (7) → refused",
+                legacy_envelope(payload=legacy_manifest(sequence=7)), "not the compiled pre-rename state")
+        hostile("legacy envelope with another version → refused",
+                legacy_envelope(payload=legacy_manifest(version="0.7.3")), "not the compiled pre-rename state")
+        hostile("legacy click outside the old repository path → refused",
+                legacy_envelope(payload=legacy_manifest(
+                    url="https://github.com/someone-else/ada-ut/releases/download/v0.7.4/x.click")),
+                "not under")
+        hostile("legacy manifest with extra platforms → refused (malformed)",
+                legacy_envelope(payload=legacy_manifest(platforms={
+                    "click": {"url": LEGACY_PREFIX + "0.7.4/a.click", "size": 1, "sha256": "ab" * 32},
+                    "linux-arm64": {"url": LEGACY_PREFIX + "0.7.4/b.tar.gz", "size": 1, "sha256": "ab" * 32}})),
+                "malformed")
+        hostile("legacy manifest with schema 2 → refused",
+                legacy_envelope(payload=legacy_manifest(schema=2)), "not a ada-ut schema-1")
+        hostile("legacy-shaped envelope under yet another channel name (ada-cli) → hard stop",
+                raw_envelope(key.priv, legacy_manifest(channel="ada-cli"), "ada-cli",
+                             "ada-cli-release-v1-" + key.fingerprint),
+                "hard stop")
+        hostile("garbage served as the live envelope → hard stop", b"{not json", "hard stop")
+        # Genuine legacy state, but the SOURCE is not the transition release.
+        stamp(3, "0.7.5")
+        rc, out = run()
+        check("authentic legacy floor but source sequence 3 → refused (only sequence 2 may stand on it)",
+              rc != 0 and "only the transition release (sequence 2)" in out and not posts(), out)
+        stamp(1, "0.7.5")
+        rc, out = run()
+        check("authentic legacy floor but source sequence 1 → refused",
+              rc != 0 and "only the transition release (sequence 2)" in out and not posts(), out)
+
+        print("— legacy transition: the one accepted state —")
+        stamp(2, "0.7.5")
+        rc, out = run()
+        rel = gh.by_tag("v0.7.5")
+        check("sequence 2 over the authenticated legacy sequence 1 publishes",
+              rc == 0 and rel is not None and rel["draft"] is False and "LEGACY ada-ut envelope" in out, out)
         check("assets uploaded in order, envelope last",
-              rel and rel["order"] == ["briglia.permaevidence_0.7.4_all.click", "manifest.json", "manifest.sig.json"],
+              rel and rel["order"] == ["briglia.permaevidence_0.7.5_all.click", "manifest.json", "manifest.sig.json"],
               rel and rel["order"])
-        ok, m = verify_public(1, "0.7.4")
-        check("public envelope verifies with the app's verifier (seq 1, v0.7.4)", ok, str(m)[:200])
-        click_built = open(os.path.join(repo, "build", "briglia.permaevidence_0.7.4_all.click"), "rb").read()
+        ok, m = verify_public(2, "0.7.5")
+        check("public envelope verifies with the app's verifier (seq 2, channel briglia-ut)",
+              ok and m["channel"] == "briglia-ut", str(m)[:200])
+        click_built = open(os.path.join(repo, "build", "briglia.permaevidence_0.7.5_all.click"), "rb").read()
         check("published click == built click, and matches the signed sha256",
-              rel["assets"]["briglia.permaevidence_0.7.4_all.click"] == click_built
+              rel["assets"]["briglia.permaevidence_0.7.5_all.click"] == click_built
               and m["platforms"]["click"]["sha256"] == hashlib.sha256(click_built).hexdigest())
         check("publication recorded after verification",
-              len(log_lines()) == 1 and json.loads(log_lines()[0])["sequence"] == 1)
+              len(log_lines()) == 1 and json.loads(log_lines()[0])["sequence"] == 2)
         check("release PATCHed with explicit make_latest",
               any(h[0] == "PATCH" for h in gh.hits))
         check("the tag is pinned to the exact reviewed HEAD commit",
               gh.created and gh.created[-1].get("target_commitish") == head(), gh.created[-1:])
+        # Inert after the transition: a replayed legacy "latest" cannot floor
+        # a later release.
+        stamp(3, "0.7.6")
+        hostile("after the transition, a replayed legacy latest cannot floor sequence 3 → refused",
+                legacy_envelope(), "only the transition release (sequence 2)")
 
         print("— supersession —")
+        stamp(2, "0.7.5")
         rc, out = run()
         check("same sequence again → superseded", rc != 0 and "superseded" in out, out)
-        stamp(2, "0.7.4")
+        stamp(3, "0.7.5")
         rc, out = run()
         check("higher sequence but same tag → immutability refuses republish",
               rc != 0 and "already exists" in out, out)
-        stamp(2, "0.7.5")
-        rc, out = run("--bootstrap")
-        check("--bootstrap with a live release refused", rc != 0 and "live signed release exists" in out, out)
-        rc, out = run()
-        check("v0.7.5 seq 2 publishes normally", rc == 0 and gh.by_tag("v0.7.5") and not gh.by_tag("v0.7.5")["draft"], out)
         ok, m = verify_public(2, "0.7.5")
         check("latest is now v0.7.5 seq 2", ok)
         rv.TRUST_FILE = os.path.join(root, "trust.json")
         rv.record_accepted(rv.ReleasePolicy("briglia-ut", key.keys(), "", gh.base + "/download/v{version}/", 1), m)
         gh.faults["latest_override"] = gh.by_tag("v0.7.4")["assets"]["manifest.sig.json"]
         ok, replayed = verify_public(1, "0.7.4")
-        check("rollback via a replayed older envelope refused",
-              not ok and isinstance(replayed, rv.ReleaseVerifyError) and replayed.kind == "rollback", str(replayed))
+        check("the app's verifier refuses a replayed pre-rename (ada-ut) envelope as wrong-channel",
+              not ok and isinstance(replayed, rv.ReleaseVerifyError) and replayed.kind == "wrong-channel", str(replayed))
         del gh.faults["latest_override"]
 
         print("— concurrency —")
@@ -449,7 +544,8 @@ def main():
         check("tampered LIVE envelope → hard stop (never unlocks bootstrap), nothing posted",
               rc != 0 and "hard stop" in out and not gh.by_tag("v0.7.10"), out)
         rc, out = run("--bootstrap")
-        check("…even with --bootstrap", rc != 0 and "hard stop" in out and not gh.by_tag("v0.7.10"), out)
+        check("…and --bootstrap no longer exists to bypass it", rc == 2 and "unknown option" in out
+              and not gh.by_tag("v0.7.10"), out)
         del gh.faults["latest_override"]
         gh.faults["download_substitute"] = {"briglia.permaevidence_0.7.10_all.click": b"not the click"}
         before = len(log_lines())
