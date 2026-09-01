@@ -107,7 +107,10 @@ FP="$("$OPENSSL" dgst -sha256 -hex < "$WORK/pub.raw" | awk '{print $NF}')"
 KEYID="$CHANNEL-release-v1-${FP:0:16}"
 SIGNING_KEY="${SIGNING_KEY:-$HOME/.briglia-release-keys/$KEYID.priv.pem}"
 [ -f "$SIGNING_KEY" ] || { echo "✖ signing key not found: $SIGNING_KEY (custody: plan §4.1)"; exit 1; }
-PERM="$(stat -f %Lp "$SIGNING_KEY" 2>/dev/null || stat -c %a "$SIGNING_KEY")"
+# Portable mode read: `stat -f %Lp` is BSD syntax, and on GNU coreutils `stat -f`
+# means FILESYSTEM stat — it succeeds with unrelated output, so a "|| stat -c"
+# fallback never runs and the check misfires on Linux (CI, 2026-09-01).
+PERM="$(python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$SIGNING_KEY")"
 [ "$PERM" = "600" ] || { echo "✖ signing key $SIGNING_KEY must be mode 0600 (is $PERM)"; exit 1; }
 
 # --- legacy-transition descriptor (RENAME_PLAN.md §3.2 / §5). After the
