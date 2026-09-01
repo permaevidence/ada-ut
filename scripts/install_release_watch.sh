@@ -2,10 +2,10 @@
 # Install (or refresh) the release-channel watcher on this Mac as two
 # launchd user agents (RELEASE_SIGNING_PLAN.md §10, Phase E):
 #
-#   com.permaevidence.ada-release-watch.check      hourly at :07 → release_watch.py check
-#   com.permaevidence.ada-release-watch.heartbeat  hourly at :37 → release_heartbeat.py
+#   com.permaevidence.briglia-release-watch.check      hourly at :07 → release_watch.py check
+#   com.permaevidence.briglia-release-watch.heartbeat  hourly at :37 → release_heartbeat.py
 #
-# The watcher runs from a SNAPSHOT under ~/.config/ada-release-watch/bin
+# The watcher runs from a SNAPSHOT under ~/.config/briglia-release-watch/bin
 # (release_watch.py, release_heartbeat.py, py/release_verify.py copied from
 # this checkout and recorded with the git commit), never from the working
 # tree — editing the repo must not silently change what the monitor does.
@@ -32,17 +32,17 @@
 #
 # Alerts go to the Telegram chat configured in the env file named by the
 # watcher config (default ~/.claude/channels/telegram/.env — the same bot
-# Claude Code uses on this Mac). Logs: ~/Library/Logs/ada-release-watch/.
-# Test hooks (selftest only): ADA_WATCH_HOME overrides $HOME; launchctl is
+# Claude Code uses on this Mac). Logs: ~/Library/Logs/briglia-release-watch/.
+# Test hooks (selftest only): BRIGLIA_WATCH_HOME overrides $HOME; launchctl is
 # resolved through PATH so a shim can stand in for it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LABEL_BASE="com.permaevidence.ada-release-watch"
-HOME_DIR="${ADA_WATCH_HOME:-${HOME:?}}"
-ROOT="$HOME_DIR/.config/ada-release-watch"
+LABEL_BASE="com.permaevidence.briglia-release-watch"
+HOME_DIR="${BRIGLIA_WATCH_HOME:-${HOME:?}}"
+ROOT="$HOME_DIR/.config/briglia-release-watch"
 BIN="$ROOT/bin"
-LOGS="$HOME_DIR/Library/Logs/ada-release-watch"
+LOGS="$HOME_DIR/Library/Logs/briglia-release-watch"
 AGENTS="$HOME_DIR/Library/LaunchAgents"
 CONFIG="$ROOT/config.json"
 PY="$(command -v python3)"
@@ -99,7 +99,7 @@ fi
 
 [ "$(uname)" = "Darwin" ] || { echo "✖ launchd installer is macOS-only (cron/systemd elsewhere)"; exit 1; }
 [ -f scripts/release_watch.py ] && [ -f scripts/release_heartbeat.py ] && [ -f py/release_verify.py ] \
-    || { echo "✖ run from an ada-ut checkout"; exit 1; }
+    || { echo "✖ run from a briglia-ut checkout"; exit 1; }
 
 mkdir -p "$ROOT" "$LOGS" "$AGENTS"
 chmod 700 "$ROOT"

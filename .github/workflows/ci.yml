@@ -43,11 +43,9 @@ jobs:
         run: python3 scripts/click_selftest.py
       - name: Chat client + QML sweep
         run: python3 scripts/chat_selftest.py
-      # scripts/watch_selftest.py is NOT run on this branch yet: the watcher
-      # (release_watch.py / release_heartbeat.py / install_release_watch.sh)
-      # is renamed in Stage 6 of the rename plan; until then its DEFAULT_CONFIG
-      # still names the previous channels while py/release_verify.py already
-      # pins the new ones, so the suite fails by construction. Stage 6
-      # restores the step.
+      - name: Release watcher + heartbeat (+ launchd installer on macOS)
+        run: python3 scripts/watch_selftest.py
+      - name: Release-key directory rename (Stage 8 helper)
+        run: python3 scripts/keys_rename_selftest.py
       - name: QR decoder + generator cross-check (vendored scripts/fixtures/qrlib.mjs)
         run: python3 scripts/qr_selftest.py

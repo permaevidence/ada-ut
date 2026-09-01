@@ -226,6 +226,55 @@ def main():
     check("README: requires Briglia CLI ≥ v0.2.0 and documents old-app coexistence",
           "≥ v0.2.0" in readme and "ada.permaevidence" in readme and "cannot self-update" in readme)
 
+    # ---- 4. release watcher, heartbeat, launchd installer, cutover helper (plan §6, §3.3)
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import release_watch  # noqa: E402
+    import release_heartbeat  # noqa: E402
+    chans = release_watch.DEFAULT_CONFIG["channels"]
+    check("watcher: exactly the two Briglia channels", sorted(chans) == ["briglia-cli", "briglia-ut"], sorted(chans))
+    check("watcher: every channel declares its kind and the pinned policy of that kind carries the same channel name",
+          chans["briglia-cli"].get("kind") == "cli" and chans["briglia-ut"].get("kind") == "app"
+          and release_verify.CLI_POLICY.channel == "briglia-cli" and release_verify.APP_POLICY.channel == "briglia-ut"
+          and set(release_watch.CHANNEL_KINDS) == {"cli", "app"})
+    check("watcher: repos, installer source, publication log and website URLs follow the new identity",
+          chans["briglia-cli"]["repo"] == "permaevidence/briglia-cli" and chans["briglia-ut"]["repo"] == "permaevidence/briglia-ut"
+          and chans["briglia-cli"]["installer_source"] == "scripts/get-briglia.sh"
+          and chans["briglia-ut"]["publication_log"] == "~/.briglia-release-keys/briglia-ut-publications.jsonl"
+          and chans["briglia-cli"]["website_install_url"] == briglia_bridge.WEBSITE_BASE + "/install.sh"
+          and chans["briglia-ut"]["website_page_url"] == briglia_bridge.WEBSITE_BASE + "/ubuntu-touch", chans)
+    check("watcher + heartbeat: one state directory, the new one",
+          release_watch.DEFAULT_CONFIG["state_dir"] == "~/.config/briglia-release-watch"
+          and release_heartbeat.DEFAULTS["state_dir"] == release_watch.DEFAULT_CONFIG["state_dir"])
+    check("watcher/heartbeat: user agents and Telegram message prefixes",
+          release_watch.USER_AGENT.startswith("briglia-release-watch/")
+          and release_heartbeat.USER_AGENT.startswith("briglia-release-heartbeat/")
+          and "briglia release watch" in read("scripts/release_watch.py")
+          and "briglia release heartbeat" in read("scripts/release_heartbeat.py"))
+    installer = read("scripts/install_release_watch.sh")
+    check("launchd installer: labels, state dir, log dir and test seam follow the new identity",
+          'LABEL_BASE="com.permaevidence.briglia-release-watch"' in installer
+          and 'ROOT="$HOME_DIR/.config/briglia-release-watch"' in installer
+          and 'LOGS="$HOME_DIR/Library/Logs/briglia-release-watch"' in installer
+          and "BRIGLIA_WATCH_HOME" in installer and "ADA_WATCH_HOME" not in installer)
+    keys_script = read("scripts/release/rename-keys-dir.sh")
+    check("cutover helper: pins the old→new key directory and refuses over a loaded previous watcher",
+          'OLD="$HOME_DIR/.ada-release-keys"' in keys_script and 'NEW="$HOME_DIR/.briglia-release-keys"' in keys_script
+          and 'OLD_LABEL_BASE="com.permaevidence.ada-release-watch"' in keys_script)
+    watcher_forbidden = ["ada-release-watch", "ada release watch", "ada release heartbeat", "ADA_WATCH_HOME",
+                         ".ada-release-keys", "get-ada.sh", "ada-app-psi", "permaevidence/ada-", '"ada-cli"', '"ada-ut"']
+    offenders = []
+    for rel in ("scripts/release_watch.py", "scripts/release_heartbeat.py", "scripts/install_release_watch.sh",
+                "scripts/publish_click.sh", ".github/workflows/ci.yml"):
+        for ln, line in enumerate(read(rel).splitlines(), 1):
+            if re.search(r"LEGACY|legacy|retired|pre-rename", line):
+                continue
+            for token in watcher_forbidden:
+                if token in line:
+                    offenders.append("%s:%d %s" % (rel, ln, token))
+    check("no retired identifier in the watcher trio, publisher or CI outside legacy-transition lines", not offenders, offenders)
+    ci = read(".github/workflows/ci.yml")
+    check("CI runs the watcher and keys-rename batteries", "scripts/watch_selftest.py" in ci and "scripts/keys_rename_selftest.py" in ci)
+
     print("\nidentity selftest: %d passed, %d failed" % (PASSED, FAILED))
     sys.exit(1 if FAILED else 0)
 

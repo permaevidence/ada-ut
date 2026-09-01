@@ -48,14 +48,14 @@ import urllib.error
 import urllib.request
 
 HEARTBEAT_VERSION = "1"
-USER_AGENT = "ada-release-heartbeat/" + HEARTBEAT_VERSION
+USER_AGENT = "briglia-release-heartbeat/" + HEARTBEAT_VERSION
 BEACON_NAME = "check.beacon.json"
 STATE_NAME = "heartbeat-state.json"
 LOCK_NAME = "heartbeat.lock"
 FUTURE_SLACK = 600          # a beacon "completed" more than 10 min in the future is corrupt
 
 DEFAULTS = {
-    "state_dir": "~/.config/ada-release-watch",
+    "state_dir": "~/.config/briglia-release-watch",
     "telegram_env_file": "~/.claude/channels/telegram/.env",
     "telegram_api": "https://api.telegram.org",
     "heartbeat_max_age_hours": 3,
@@ -192,7 +192,7 @@ def read_beacon(state_dir, now, max_age):
     oldest = b.get("oldest_queued")
     if isinstance(queued, int) and queued > 0 and isinstance(oldest, (int, float)) and now - oldest > max_age:
         return ("the check completes but has %d undelivered alert(s) queued since %s — the checker cannot reach Telegram; "
-                "read ~/Library/Logs/ada-release-watch/check.log" % (queued, iso(oldest))), b
+                "read ~/Library/Logs/briglia-release-watch/check.log" % (queued, iso(oldest))), b
     return None, b
 
 
@@ -222,17 +222,17 @@ def run(cfg, cfg_problem, now=None):
             prev = st.get("active")
             if prev is None:
                 st["active"] = {"first": now, "last_sent": now, "text": problem}
-                messages.append("🚨 ada release heartbeat — %s" % text)
+                messages.append("🚨 briglia release heartbeat — %s" % text)
             elif now - float(prev.get("last_sent", 0)) >= realert or prev.get("text") != problem:
                 prev["last_sent"] = now
                 prev["text"] = problem
-                messages.append("🚨 ada release heartbeat — STILL FAILING since %s — %s" % (iso(float(prev.get("first", now))), text))
+                messages.append("🚨 briglia release heartbeat — STILL FAILING since %s — %s" % (iso(float(prev.get("first", now))), text))
             print("  ✖ %s" % problem)
         else:
             prev = st.get("active")
             if prev:
                 st["active"] = None
-                messages.append("✅ ada release heartbeat — hourly checks are completing again (last %s; failing since %s)"
+                messages.append("✅ briglia release heartbeat — hourly checks are completing again (last %s; failing since %s)"
                                 % (iso(float(beacon["completed"])), iso(float(prev.get("first", now)))))
             print("  ✔ last check completed %s (%d finding(s), %d queued)"
                   % (iso(float(beacon["completed"])), int(beacon.get("findings") or 0), int(beacon.get("queued") or 0)))
@@ -262,7 +262,7 @@ def main(argv=None):
     ap.add_argument("--status", action="store_true", help="print the beacon and the heartbeat's own state")
     args = ap.parse_args(argv)
     cfg, cfg_problem = load_config(args.config)
-    print("ada release heartbeat v%s — %s" % (HEARTBEAT_VERSION, iso(time.time())))
+    print("briglia release heartbeat v%s — %s" % (HEARTBEAT_VERSION, iso(time.time())))
     if args.status:
         state_dir = os.path.expanduser(cfg["state_dir"])
         for name in (BEACON_NAME, STATE_NAME):

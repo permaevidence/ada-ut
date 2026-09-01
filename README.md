@@ -188,8 +188,17 @@ live the path is inert; the block is deleted right after v0.8.0 publishes.
 
 `scripts/release_watch.py` / `scripts/release_heartbeat.py` /
 `scripts/install_release_watch.sh` are the deterministic release-channel
-watcher, its independent heartbeat and their launchd installer;
-`scripts/watch_selftest.py` is their battery.
+watcher, its independent heartbeat and their launchd installer (labels
+`com.permaevidence.briglia-release-watch.{check,heartbeat}`, state under
+`~/.config/briglia-release-watch`, logs under
+`~/Library/Logs/briglia-release-watch`); `scripts/watch_selftest.py` is their
+battery. Every watched channel carries an explicit `kind` (`cli` | `app`)
+that selects its policy and corroboration; a channel name that disagrees
+with the pinned verifier is a loud `config-invalid` alert, never a skipped
+check. `scripts/release/rename-keys-dir.sh` is the one-shot cutover helper
+that moves the publishing Mac's key directory to the new identity (same key
+material, re-derived IDs, notes beside the encrypted backups);
+`scripts/keys_rename_selftest.py` proves it against a throwaway home.
 
 ## Device assumptions
 

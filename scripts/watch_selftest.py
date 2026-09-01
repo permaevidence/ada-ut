@@ -24,7 +24,7 @@ import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from signing_fixture import TestKey  # noqa: E402
+from signing_fixture import TestKey, raw_envelope  # noqa: E402
 
 PASSED = FAILED = 0
 
@@ -181,14 +181,14 @@ JOBS_OK = [{"name": n, "conclusion": "success"} for n in
 
 
 def main():
-    root = tempfile.mkdtemp(prefix="ada-watch-selftest-")
+    root = tempfile.mkdtemp(prefix="briglia-watch-selftest-")
     repo_src = os.path.dirname(HERE)
     repo = os.path.join(root, "repo")
     os.makedirs(repo)
     for item in ("py", "scripts"):
         shutil.copytree(os.path.join(repo_src, item), os.path.join(repo, item),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    cli_key, app_key = TestKey("ada-cli"), TestKey("ada-ut")
+    cli_key, app_key = TestKey("briglia-cli"), TestKey("briglia-ut")
     rv_path = os.path.join(repo, "py", "release_verify.py")
     s = open(rv_path).read()
     s = re.sub(r"# STAMP-CLI-KEY-BEGIN.*?# STAMP-CLI-KEY-END",
@@ -196,13 +196,14 @@ def main():
     s = re.sub(r"# STAMP-APP-KEY-BEGIN.*?# STAMP-APP-KEY-END",
                '# STAMP-APP-KEY-BEGIN\nAPP_KEYS = {\n    "%s":\n        "%s",\n}\n# STAMP-APP-KEY-END' % (app_key.key_id, app_key.pub_hex), s, flags=re.S)
     s = re.sub(r"^MIN_CLI_SEQUENCE = \d+$", "MIN_CLI_SEQUENCE = 1", s, flags=re.M)
+    s = re.sub(r"^MIN_APP_SEQUENCE = \d+$", "MIN_APP_SEQUENCE = 1", s, flags=re.M)
     open(rv_path, "w").write(s)
 
     fake = Fake()
     B = fake.base
     tg_env = os.path.join(root, "tg.env")
     open(tg_env, "w").write("TELEGRAM_BOT_TOKEN=tok\nOWNER_CHAT_ID=1\n")
-    pub_log = os.path.join(root, "ada-ut-publications.jsonl")
+    pub_log = os.path.join(root, "briglia-ut-publications.jsonl")
     state_dir = os.path.join(root, "state")
     cfg_path = os.path.join(root, "cfg.json")
     cfg = {
@@ -210,16 +211,16 @@ def main():
         "telegram_env_file": tg_env, "telegram_api": B + "/tg",
         "realert_hours": 6, "heartbeat_max_age_hours": 3, "expiry_warning_days": 30,
         "channels": {
-            "ada-cli": {"repo": "test/ada-cli", "workflow_name": "Release (signed)",
-                        "installer_asset": "install.sh", "installer_source": "scripts/get-ada.sh",
+            "briglia-cli": {"kind": "cli", "repo": "test/briglia-cli", "workflow_name": "Release (signed)",
+                        "installer_asset": "install.sh", "installer_source": "scripts/get-briglia.sh",
                         "website_install_url": B + "/site/cli/install.sh",
-                        "envelope_url": B + "/latest/ada-cli/manifest.sig.json",
-                        "artifact_url_prefix": B + "/download/ada-cli/v{version}/",
+                        "envelope_url": B + "/latest/briglia-cli/manifest.sig.json",
+                        "artifact_url_prefix": B + "/download/briglia-cli/v{version}/",
                         "legacy_blob_manifest": None},
-            "ada-ut": {"repo": "test/ada-ut", "publication_log": pub_log,
+            "briglia-ut": {"kind": "app", "repo": "test/briglia-ut", "publication_log": pub_log,
                        "website_page_url": B + "/site/app",
-                       "envelope_url": B + "/latest/ada-ut/manifest.sig.json",
-                       "artifact_url_prefix": B + "/download/ada-ut/v{version}/",
+                       "envelope_url": B + "/latest/briglia-ut/manifest.sig.json",
+                       "artifact_url_prefix": B + "/download/briglia-ut/v{version}/",
                        "legacy_blob_manifest": B + "/legacy/manifest.json"},
         },
     }
@@ -250,7 +251,7 @@ def main():
         return key.sign(json.dumps(payload, sort_keys=True, indent=2).encode())
 
     def publish(chan, version, seq, assets, commit, expires_days=180, workflow="success", log=True, immutable=True):
-        key = cli_key if chan == "ada-cli" else app_key
+        key = cli_key if chan == "briglia-cli" else app_key
         repo_name = "test/" + chan
         for n, b in assets.items():
             fake.assets[(chan, version, n)] = b
@@ -259,10 +260,10 @@ def main():
         rid = 1000 + len(fake.releases.get(repo_name, []))
         fake.releases.setdefault(repo_name, []).append({"id": rid, "tag_name": "v" + version, "draft": False, "immutable": immutable})
         fake.tags.setdefault(repo_name, {})["v" + version] = commit
-        if chan == "ada-cli":
+        if chan == "briglia-cli":
             fake.assets[(chan, version, "install.sh")] = assets.get("install.sh", b"")
-            fake.raw[(repo_name, "v" + version, "scripts/get-ada.sh")] = assets.get("install.sh", b"")
-            fake.site_installer_redirect = "%s/download/ada-cli/v%s/install.sh" % (B, version)
+            fake.raw[(repo_name, "v" + version, "scripts/get-briglia.sh")] = assets.get("install.sh", b"")
+            fake.site_installer_redirect = "%s/download/briglia-cli/v%s/install.sh" % (B, version)
             if workflow:
                 fake.runs.setdefault(repo_name, []).append({
                     "id": 500 + seq, "name": "Release (signed)", "head_sha": commit, "head_branch": "v" + version,
@@ -270,7 +271,7 @@ def main():
                     "jobs": JOBS_OK if workflow == "success" else [{"name": "Sign metadata", "conclusion": "failure"}]})
         else:
             click = assets["click"]
-            fake.site_page = ("<a href=\"%s/download/ada-ut/v%s/click\">download</a>" % (B, version)).encode()
+            fake.site_page = ("<a href=\"%s/download/briglia-ut/v%s/click\">download</a>" % (B, version)).encode()
             fake.legacy_manifest = {"version": version, "sha256": sha(click), "size": len(click)}
             if log:
                 with open(pub_log, "a") as f:
@@ -282,16 +283,16 @@ def main():
     C1, C2, C3 = "a" * 40, "b" * 40, "c" * 40
     try:
         print("— first run: both channels seeded and announced —")
-        publish("ada-cli", "0.1.58", 58, {"ada-macos-arm64.tar.gz": b"mac58" * 1000, "ada-linux-x64.tar.gz": b"lin58" * 1000,
+        publish("briglia-cli", "0.1.58", 58, {"briglia-macos-arm64.tar.gz": b"mac58" * 1000, "briglia-linux-x64.tar.gz": b"lin58" * 1000,
                                           "install.sh": b"#!/bin/bash\necho installer 58\n"}, C1)
-        publish("ada-ut", "0.7.4", 1, {"click": b"click74" * 500}, C2)
+        publish("briglia-ut", "0.7.4", 1, {"click": b"click74" * 500}, C2)
         rc, out = run()
         st = state()
-        check("first check exits 0, records both channels", rc == 0 and st["recorded"]["ada-cli"]["sequence"] == 58
-              and st["recorded"]["ada-ut"]["sequence"] == 1 and st["recorded"]["ada-cli"]["commit"] == C1, out)
+        check("first check exits 0, records both channels", rc == 0 and st["recorded"]["briglia-cli"]["sequence"] == 58
+              and st["recorded"]["briglia-ut"]["sequence"] == 1 and st["recorded"]["briglia-cli"]["commit"] == C1, out)
         check("recording is announced (two ℹ️ messages), no alerts",
               len(fake.telegram) == 2 and all(m.startswith("ℹ️") and "RECORDED" in m for m in fake.telegram), fake.telegram)
-        check("full hash performed on first record", set(st["full_hash_at"]) == {"ada-cli", "ada-ut"}
+        check("full hash performed on first record", set(st["full_hash_at"]) == {"briglia-cli", "briglia-ut"}
               and "full download of every asset matches" in out, out)
         check("installer identity + website resolution + page link + legacy manifest all verified",
               all(x in out for x in ("byte-identical", "website install URL resolves", "website page links", "legacy transition manifest agrees")), out)
@@ -301,36 +302,36 @@ def main():
               rc == 0 and not fake.telegram and "full download" not in out and "matches the recorded authorized release" in out, out)
 
         print("— envelope integrity —")
-        good = fake.envelopes["ada-cli"]
+        good = fake.envelopes["briglia-cli"]
         t = json.loads(good); t["signature"] = ("A" if t["signature"][0] != "A" else "B") + t["signature"][1:]
-        fake.envelopes["ada-cli"] = json.dumps(t).encode()
+        fake.envelopes["briglia-cli"] = json.dumps(t).encode()
         rc, out = run()
-        check("tampered live envelope → alert (ada-cli/envelope-invalid), exit 2",
+        check("tampered live envelope → alert (briglia-cli/envelope-invalid), exit 2",
               rc == 2 and any("envelope-invalid" in m for m in fake.telegram), fake.telegram)
         n = len(fake.telegram)
         rc, out = run()
         check("same failure within the re-alert window is NOT re-sent", len(fake.telegram) == n, fake.telegram[n:])
-        set_state(lambda st: st["active"]["ada-cli/envelope-invalid"].__setitem__("last_sent", time.time() - 7 * 3600))
+        set_state(lambda st: st["active"]["briglia-cli/envelope-invalid"].__setitem__("last_sent", time.time() - 7 * 3600))
         rc, out = run()
         check("after realert_hours the failure is re-sent as STILL FAILING",
               len(fake.telegram) == n + 1 and "STILL FAILING" in fake.telegram[-1], fake.telegram[n:])
-        fake.envelopes["ada-cli"] = good
+        fake.envelopes["briglia-cli"] = good
         fake.telegram.clear()
         rc, out = run()
         check("recovery message when the envelope is good again", rc == 0 and len(fake.telegram) == 1
               and fake.telegram[0].startswith("✅") and "envelope-invalid" in fake.telegram[0], fake.telegram)
         fake.telegram.clear()
-        fake.envelopes["ada-cli"] = envelope(TestKey("ada-cli"), "ada-cli", "0.1.58", 58,
-                                             {"ada-macos-arm64.tar.gz": b"mac58" * 1000, "ada-linux-x64.tar.gz": b"lin58" * 1000, "install.sh": b"x"})
+        fake.envelopes["briglia-cli"] = envelope(TestKey("briglia-cli"), "briglia-cli", "0.1.58", 58,
+                                             {"briglia-macos-arm64.tar.gz": b"mac58" * 1000, "briglia-linux-x64.tar.gz": b"lin58" * 1000, "install.sh": b"x"})
         rc, out = run()
         check("envelope signed by a DIFFERENT key → rejected", rc == 2 and any("envelope-invalid" in m for m in fake.telegram), fake.telegram)
-        fake.envelopes["ada-cli"] = good
+        fake.envelopes["briglia-cli"] = good
         run(); fake.telegram.clear()
 
         print("— rollback / sibling / new release —")
-        older = envelope(cli_key, "ada-cli", "0.1.57", 57, {"ada-macos-arm64.tar.gz": b"mac57" * 1000})
-        fake.assets[("ada-cli", "0.1.57", "ada-macos-arm64.tar.gz")] = b"mac57" * 1000
-        fake.envelopes["ada-cli"] = older
+        older = envelope(cli_key, "briglia-cli", "0.1.57", 57, {"briglia-macos-arm64.tar.gz": b"mac57" * 1000})
+        fake.assets[("briglia-cli", "0.1.57", "briglia-macos-arm64.tar.gz")] = b"mac57" * 1000
+        fake.envelopes["briglia-cli"] = older
         rc, out = run()
         check("latest URL replaying an OLDER valid envelope (GitHub still says 0.1.58) → rollback alert + latest-mismatch",
               rc == 2 and any("/rollback" in m and "sequence 57" in m for m in fake.telegram)
@@ -341,41 +342,41 @@ def main():
         check("…rollback is still judged when the GitHub API is down", rc == 2 and "/rollback" in out, out)
         del fake.faults["api_status"]
         # deleted-release variant: 0.1.58 vanishes from GitHub, 0.1.57 is latest again
-        saved_rel, saved_tag = fake.releases["test/ada-cli"].pop(), fake.tags["test/ada-cli"].pop("v0.1.58")
-        fake.releases["test/ada-cli"].append({"id": 900, "tag_name": "v0.1.57", "draft": False, "immutable": True})
-        fake.tags["test/ada-cli"]["v0.1.57"] = "9" * 40
+        saved_rel, saved_tag = fake.releases["test/briglia-cli"].pop(), fake.tags["test/briglia-cli"].pop("v0.1.58")
+        fake.releases["test/briglia-cli"].append({"id": 900, "tag_name": "v0.1.57", "draft": False, "immutable": True})
+        fake.tags["test/briglia-cli"]["v0.1.57"] = "9" * 40
         rc, out = run()
         check("release deleted wholesale (0.1.57 latest again) → rollback alert, record keeps 58",
-              rc == 2 and "/rollback" in out and state()["recorded"]["ada-cli"]["sequence"] == 58, out)
-        fake.releases["test/ada-cli"].pop(); fake.tags["test/ada-cli"].pop("v0.1.57")
-        fake.releases["test/ada-cli"].append(saved_rel); fake.tags["test/ada-cli"]["v0.1.58"] = saved_tag
-        fake.envelopes["ada-cli"] = good; run(); fake.telegram.clear()
-        sibling = envelope(cli_key, "ada-cli", "0.1.58", 58, {"ada-macos-arm64.tar.gz": b"EVIL" * 1000, "ada-linux-x64.tar.gz": b"lin58" * 1000, "install.sh": b"#!/bin/bash\necho installer 58\n"})
-        fake.envelopes["ada-cli"] = sibling
+              rc == 2 and "/rollback" in out and state()["recorded"]["briglia-cli"]["sequence"] == 58, out)
+        fake.releases["test/briglia-cli"].pop(); fake.tags["test/briglia-cli"].pop("v0.1.57")
+        fake.releases["test/briglia-cli"].append(saved_rel); fake.tags["test/briglia-cli"]["v0.1.58"] = saved_tag
+        fake.envelopes["briglia-cli"] = good; run(); fake.telegram.clear()
+        sibling = envelope(cli_key, "briglia-cli", "0.1.58", 58, {"briglia-macos-arm64.tar.gz": b"EVIL" * 1000, "briglia-linux-x64.tar.gz": b"lin58" * 1000, "install.sh": b"#!/bin/bash\necho installer 58\n"})
+        fake.envelopes["briglia-cli"] = sibling
         rc, out = run()
         check("validly signed envelope with the SAME sequence but different assets → record-mismatch alert",
               rc == 2 and any("record-mismatch" in m and "assets" in m for m in fake.telegram), fake.telegram)
-        fake.envelopes["ada-cli"] = good; run(); fake.telegram.clear()
-        publish("ada-cli", "0.1.59", 59, {"ada-macos-arm64.tar.gz": b"mac59" * 1000, "ada-linux-x64.tar.gz": b"lin59" * 1000,
+        fake.envelopes["briglia-cli"] = good; run(); fake.telegram.clear()
+        publish("briglia-cli", "0.1.59", 59, {"briglia-macos-arm64.tar.gz": b"mac59" * 1000, "briglia-linux-x64.tar.gz": b"lin59" * 1000,
                                           "install.sh": b"#!/bin/bash\necho installer 59\n"}, C3, workflow="failure")
         rc, out = run()
         st = state()
         check("new release whose workflow FAILED → uncorroborated alert, NOT recorded (record stays 58)",
-              rc == 2 and st["recorded"]["ada-cli"]["sequence"] == 58 and any("uncorroborated" in m for m in fake.telegram), fake.telegram)
+              rc == 2 and st["recorded"]["briglia-cli"]["sequence"] == 58 and any("uncorroborated" in m for m in fake.telegram), fake.telegram)
         fake.telegram.clear()
-        fake.runs["test/ada-cli"][-1].update({"conclusion": "success", "jobs": JOBS_OK})
+        fake.runs["test/briglia-cli"][-1].update({"conclusion": "success", "jobs": JOBS_OK})
         rc, out = run()
         st = state()
         check("same release once the workflow is green → recorded + announced + recovery for the previous alert",
-              rc == 0 and st["recorded"]["ada-cli"]["sequence"] == 59 and st["recorded"]["ada-cli"]["commit"] == C3
+              rc == 0 and st["recorded"]["briglia-cli"]["sequence"] == 59 and st["recorded"]["briglia-cli"]["commit"] == C3
               and any("RECORDED" in m and "v0.1.59" in m for m in fake.telegram)
               and any(m.startswith("✅") and "uncorroborated" in m for m in fake.telegram), fake.telegram)
         fake.telegram.clear()
-        fake.tags["test/ada-cli"]["v0.1.59"] = "d" * 40
+        fake.tags["test/briglia-cli"]["v0.1.59"] = "d" * 40
         rc, out = run()
         check("tag moved to another commit after recording → record-mismatch (commit)",
               rc == 2 and any("record-mismatch" in m and "commit" in m for m in fake.telegram), fake.telegram)
-        fake.tags["test/ada-cli"]["v0.1.59"] = {"tag_sha": "e" * 40, "commit": C3}
+        fake.tags["test/briglia-cli"]["v0.1.59"] = {"tag_sha": "e" * 40, "commit": C3}
         fake.telegram.clear()
         rc, out = run()
         check("annotated tag resolving to the recorded commit → clean (recovery only)",
@@ -383,46 +384,46 @@ def main():
         fake.telegram.clear()
 
         print("— GitHub state —")
-        fake.releases["test/ada-cli"].append({"id": 1099, "tag_name": "v0.1.60", "draft": False, "immutable": True})
+        fake.releases["test/briglia-cli"].append({"id": 1099, "tag_name": "v0.1.60", "draft": False, "immutable": True})
         rc, out = run()
         check("a newer non-draft release while latest stays 0.1.59 → latest-mismatch/frozen alert",
               rc == 2 and any("latest" in m for m in fake.telegram), fake.telegram)
-        fake.releases["test/ada-cli"].pop(); run(); fake.telegram.clear()
-        fake.releases["test/ada-cli"][-1]["immutable"] = False
+        fake.releases["test/briglia-cli"].pop(); run(); fake.telegram.clear()
+        fake.releases["test/briglia-cli"][-1]["immutable"] = False
         rc, out = run()
         check("latest release not immutable → alert", rc == 2 and any("not-immutable" in m for m in fake.telegram), fake.telegram)
-        fake.releases["test/ada-cli"][-1]["immutable"] = True; run(); fake.telegram.clear()
+        fake.releases["test/briglia-cli"][-1]["immutable"] = True; run(); fake.telegram.clear()
         fake.faults["api_status"] = 503
         rc, out = run()
         check("GitHub API unreachable → alert, never silent", rc == 2 and any("github-unreachable" in m for m in fake.telegram), fake.telegram)
         del fake.faults["api_status"]; run(); fake.telegram.clear()
 
         print("— assets —")
-        fake.faults["asset_404"] = "ada-linux-x64.tar.gz"
+        fake.faults["asset_404"] = "briglia-linux-x64.tar.gz"
         rc, out = run()
         check("asset missing at its immutable URL → asset-unreachable alert",
-              rc == 2 and any("asset-unreachable" in m and "ada-linux-x64.tar.gz" in m for m in fake.telegram), fake.telegram)
+              rc == 2 and any("asset-unreachable" in m and "briglia-linux-x64.tar.gz" in m for m in fake.telegram), fake.telegram)
         del fake.faults["asset_404"]; run(); fake.telegram.clear()
         fake.faults["range_total"] = 12345
         rc, out = run()
         check("server reporting a different total size → alert (Range probe)",
               rc == 2 and any("signed size" in m for m in fake.telegram), fake.telegram)
         del fake.faults["range_total"]; run(); fake.telegram.clear()
-        fake.faults["asset_sub"] = {"ada-macos-arm64.tar.gz": b"mac59" * 999 + b"XXXXX"}
+        fake.faults["asset_sub"] = {"briglia-macos-arm64.tar.gz": b"mac59" * 999 + b"XXXXX"}
         rc, out = run()
         check("substituted bytes with the right size pass the hourly probe (documented limit)", rc == 0 and not fake.telegram, out)
-        set_state(lambda st: st["full_hash_at"].__setitem__("ada-cli", 0))
+        set_state(lambda st: st["full_hash_at"].__setitem__("briglia-cli", 0))
         rc, out = run()
         check("…and are caught by the daily full download (asset-hash alert)",
               rc == 2 and any("asset-hash" in m for m in fake.telegram), fake.telegram)
         del fake.faults["asset_sub"]; run(); fake.telegram.clear()
 
         print("— installer + website —")
-        fake.raw[("test/ada-cli", "v0.1.59", "scripts/get-ada.sh")] = b"#!/bin/bash\necho DIFFERENT\n"
+        fake.raw[("test/briglia-cli", "v0.1.59", "scripts/get-briglia.sh")] = b"#!/bin/bash\necho DIFFERENT\n"
         rc, out = run()
-        check("released install.sh ≠ scripts/get-ada.sh@tag → installer alert",
+        check("released install.sh ≠ scripts/get-briglia.sh@tag → installer alert",
               rc == 2 and any("/installer" in m and "differs" in m for m in fake.telegram), fake.telegram)
-        fake.raw[("test/ada-cli", "v0.1.59", "scripts/get-ada.sh")] = b"#!/bin/bash\necho installer 59\n"; run(); fake.telegram.clear()
+        fake.raw[("test/briglia-cli", "v0.1.59", "scripts/get-briglia.sh")] = b"#!/bin/bash\necho installer 59\n"; run(); fake.telegram.clear()
         fake.site_installer = b"#!/bin/bash\necho stale website copy\n"
         rc, out = run()
         check("website install URL serving different bytes → website-installer alert",
@@ -432,7 +433,7 @@ def main():
         rc, out = run()
         check("app page not linking the released click → website-page alert",
               rc == 2 and any("website-page" in m for m in fake.telegram), fake.telegram)
-        fake.site_page = ("<a href=\"%s/download/ada-ut/v0.7.4/click\">x</a>" % B).encode(); run(); fake.telegram.clear()
+        fake.site_page = ("<a href=\"%s/download/briglia-ut/v0.7.4/click\">x</a>" % B).encode(); run(); fake.telegram.clear()
         fake.legacy_manifest = {"version": "0.7.3", "sha256": "00" * 32}
         rc, out = run()
         check("legacy Blob manifest disagreeing with the authoritative release → legacy-blob alert",
@@ -440,37 +441,37 @@ def main():
         fake.legacy_manifest = {"version": "0.7.4", "sha256": sha(b"click74" * 500), "size": len(b"click74" * 500)}; run(); fake.telegram.clear()
 
         print("— app corroboration —")
-        env75 = publish("ada-ut", "0.7.5", 2, {"click": b"click75" * 500}, "f" * 40, log=False)
+        env75 = publish("briglia-ut", "0.7.5", 2, {"click": b"click75" * 500}, "f" * 40, log=False)
         rc, out = run()
         st = state()
         check("new app release absent from the local publication log → uncorroborated, not recorded",
-              rc == 2 and st["recorded"]["ada-ut"]["sequence"] == 1 and any("uncorroborated" in m and "publication log" in m for m in fake.telegram), fake.telegram)
+              rc == 2 and st["recorded"]["briglia-ut"]["sequence"] == 1 and any("uncorroborated" in m and "publication log" in m for m in fake.telegram), fake.telegram)
         fake.telegram.clear()
         with open(pub_log, "a") as f:
             f.write(json.dumps({"tag": "v0.7.5", "version": "0.7.5", "sequence": 2, "clickSha256": "11" * 32,
-                                "envelopeSha256": sha(fake.envelopes["ada-ut"]), "commit": "f" * 40}) + "\n")
+                                "envelopeSha256": sha(fake.envelopes["briglia-ut"]), "commit": "f" * 40}) + "\n")
         rc, out = run()
         check("publication log entry with a different click hash → still uncorroborated",
-              rc == 2 and state()["recorded"]["ada-ut"]["sequence"] == 1, out)
+              rc == 2 and state()["recorded"]["briglia-ut"]["sequence"] == 1, out)
         fake.telegram.clear()
         with open(pub_log, "a") as f:
             f.write(json.dumps({"tag": "v0.7.5", "version": "0.7.5", "sequence": 2, "clickSha256": sha(b"click75" * 500),
-                                "envelopeSha256": sha(fake.envelopes["ada-ut"]), "commit": "f" * 40}) + "\n")
+                                "envelopeSha256": sha(fake.envelopes["briglia-ut"]), "commit": "f" * 40}) + "\n")
         rc, out = run()
         check("matching publication log entry → recorded + announced",
-              rc == 0 and state()["recorded"]["ada-ut"]["sequence"] == 2 and any("RECORDED" in m and "v0.7.5" in m for m in fake.telegram), fake.telegram)
+              rc == 0 and state()["recorded"]["briglia-ut"]["sequence"] == 2 and any("RECORDED" in m and "v0.7.5" in m for m in fake.telegram), fake.telegram)
         fake.telegram.clear()
 
         print("— expiry —")
-        fake.envelopes["ada-ut"] = envelope(app_key, "ada-ut", "0.7.5", 2, {"click": b"click75" * 500}, expires_days=10,
-                                            published=state()["recorded"]["ada-ut"]["published"])
+        fake.envelopes["briglia-ut"] = envelope(app_key, "briglia-ut", "0.7.5", 2, {"click": b"click75" * 500}, expires_days=10,
+                                            published=state()["recorded"]["briglia-ut"]["published"])
         rc, out = run()
         check("metadata expiring within the warning window → expiry alert (plus record mismatch on the changed expiry)",
               rc == 2 and any("/expiry" in m and "10.0 days" in m or "/expiry" in m and "9.9 days" in m for m in fake.telegram), fake.telegram)
         fake.telegram.clear()
 
         print("— delivery, locking, heartbeat —")
-        fake.envelopes["ada-ut"] = env75      # back to the recorded envelope: expiry + mismatch recover
+        fake.envelopes["briglia-ut"] = env75      # back to the recorded envelope: expiry + mismatch recover
         run(); fake.telegram.clear()
         fake.faults["tg_status"] = 500
         fake.faults["asset_404"] = "click"
@@ -569,7 +570,7 @@ def main():
         fake_home = os.path.join(root, "fakehome"); os.makedirs(fake_home)
         env = dict(os.environ, HOME=fake_home)
         rc, out = hb(config=os.path.join(root, "missing-config.json"), env=env)
-        hb_default_state = os.path.join(fake_home, ".config", "ada-release-watch", "heartbeat-state.json")
+        hb_default_state = os.path.join(fake_home, ".config", "briglia-release-watch", "heartbeat-state.json")
         check("missing config → built-in defaults, still tries to alert (no beacon there), never touches the real state dir",
               rc == 2 and "built-in defaults" in out and os.path.exists(hb_default_state) and beacon()["findings"] == 0, out)
         open(os.path.join(root, "bad-config.json"), "w").write("{oops")
@@ -590,8 +591,8 @@ def main():
         print("— state durability and recovery —")
         state_path = os.path.join(state_dir, "state.json")
         prev_path = state_path + ".prev"
-        seq_now = state()["recorded"]["ada-cli"]["sequence"]   # 59 at this point in the battery
-        check("state.json.prev exists after saves and is a valid previous state", os.path.exists(prev_path) and json.load(open(prev_path))["recorded"]["ada-cli"]["sequence"] == seq_now)
+        seq_now = state()["recorded"]["briglia-cli"]["sequence"]   # 59 at this point in the battery
+        check("state.json.prev exists after saves and is a valid previous state", os.path.exists(prev_path) and json.load(open(prev_path))["recorded"]["briglia-cli"]["sequence"] == seq_now)
         check("state files are private (0600)", (os.stat(state_path).st_mode & 0o777) == 0o600 and (os.stat(prev_path).st_mode & 0o777) == 0o600)
         good = open(state_path).read()
         open(state_path, "w").write("{garbage")
@@ -599,21 +600,21 @@ def main():
         st = state()
         aside = [f for f in os.listdir(state_dir) if f.startswith("state.json.corrupt-")]
         check("corrupt state.json → recovered from .prev, floor kept, damaged file kept aside, recovery ANNOUNCED",
-              rc == 0 and st["recorded"]["ada-cli"]["sequence"] == seq_now and aside
+              rc == 0 and st["recorded"]["briglia-cli"]["sequence"] == seq_now and aside
               and any("recovered from the last-known-good" in m and "seq %d" % seq_now in m for m in fake.telegram), (out[-300:], fake.telegram))
         fake.telegram.clear()
         rc, out = run()
         check("next run is silent again", rc == 0 and not fake.telegram, fake.telegram)
-        bad = json.loads(good); bad["recorded"]["ada-cli"]["sequence"] = "58"
+        bad = json.loads(good); bad["recorded"]["briglia-cli"]["sequence"] = "58"
         json.dump(bad, open(state_path, "w"))
         rc, out = run()
         check("VALID JSON of the wrong shape (string sequence) is treated as corrupt → recovered, announced",
-              rc == 0 and isinstance(state()["recorded"]["ada-cli"]["sequence"], int) and any("recovered" in m for m in fake.telegram), fake.telegram)
+              rc == 0 and isinstance(state()["recorded"]["briglia-cli"]["sequence"], int) and any("recovered" in m for m in fake.telegram), fake.telegram)
         fake.telegram.clear()
         os.unlink(state_path)
         rc, out = run()
         check("state.json missing but .prev present (crash between renames) → recovered, announced",
-              rc == 0 and state()["recorded"]["ada-cli"]["sequence"] == seq_now and any("was missing" in m for m in fake.telegram), fake.telegram)
+              rc == 0 and state()["recorded"]["briglia-cli"]["sequence"] == seq_now and any("was missing" in m for m in fake.telegram), fake.telegram)
         fake.telegram.clear()
         b_before = beacon()
         open(state_path, "w").write("{garbage"); open(prev_path, "w").write("{garbage")
@@ -628,11 +629,75 @@ def main():
         check("status prints the state", rc == 0 and '"recorded"' in out, out[-200:])
         check("bot token never appears in output or state", "tok" not in out.replace("token", "") and "tok" not in json.dumps(state()).replace("token", ""))
 
+        # ------------------------------- config-driven kind + retired-channel replay
+        print("— config-driven channel kind (rename plan §6) and pre-rename envelope replay —")
+        st_before = json.dumps(state()["recorded"], sort_keys=True)
+
+        def run_with(cfg_variant, tag):
+            path = os.path.join(root, "cfg-%s.json" % tag)
+            variant = json.loads(json.dumps(cfg_variant))
+            variant["state_dir"] = os.path.join(root, "state-" + tag)
+            json.dump(variant, open(path, "w"))
+            p = subprocess.run([sys.executable, watcher, "check", "--config", path], capture_output=True, text=True)
+            rec = json.load(open(os.path.join(variant["state_dir"], "state.json")))["recorded"]
+            return p.returncode, p.stdout + p.stderr, rec
+
+        # load_config merges a config file OVER DEFAULT_CONFIG per channel, so the
+        # two production channels always carry their built-in kind; a channel the
+        # defaults do not know must declare its own.
+        nokind = json.loads(json.dumps(cfg))
+        nokind["channels"]["briglia-cli-staging"] = {k: v for k, v in nokind["channels"]["briglia-cli"].items() if k != "kind"}
+        rc, out, rec = run_with(nokind, "nokind")
+        check("a channel the defaults don't know, declared without `kind` → config-invalid alert, exit 2, nothing recorded "
+              "for it, the known channels still checked",
+              rc == 2 and "briglia-cli-staging/config-invalid" in out and "no valid kind" in out
+              and "briglia-cli-staging" not in rec and rec.get("briglia-cli", {}).get("sequence") is not None
+              and rec.get("briglia-ut", {}).get("sequence") is not None
+              and any("config-invalid" in m and "no valid kind" in m for m in fake.telegram), (out[-400:], rec))
+        fake.telegram.clear()
+        badkind = json.loads(json.dumps(cfg)); badkind["channels"]["briglia-cli"]["kind"] = "phone"
+        rc, out, rec = run_with(badkind, "badkind")
+        check("unknown kind → config-invalid, nothing recorded",
+              rc == 2 and "briglia-cli/config-invalid" in out and "briglia-cli" not in rec, out[-300:])
+        fake.telegram.clear()
+        stale = json.loads(json.dumps(cfg))
+        stale["channels"]["ada-cli"] = stale["channels"].pop("briglia-cli")   # the pre-rename name, correct kind
+        rc, out, rec = run_with(stale, "stale")
+        check("config still keyed by the retired channel name (kind correct) → config-invalid naming the disagreement, "
+              "no fetch, nothing recorded",
+              rc == 2 and "ada-cli/config-invalid" in out and "disagree" in out and "pinned cli policy" in out
+              and "ada-cli" not in rec and "briglia-cli" not in rec, out[-400:])
+        fake.telegram.clear()
+        swapped = json.loads(json.dumps(cfg)); swapped["channels"]["briglia-cli"]["kind"] = "app"
+        rc, out, rec = run_with(swapped, "swapped")
+        check("right name, wrong kind (app policy for the cli channel) → config-invalid, nothing recorded",
+              rc == 2 and "briglia-cli/config-invalid" in out and "briglia-cli" not in rec, out[-300:])
+        fake.telegram.clear()
+        # A pre-rename envelope — the SAME key material under its retired keyId,
+        # channel `ada-cli` — served as latest on the renamed channel: exactly what
+        # the redirect serves between the repo rename and the first Briglia release.
+        good = fake.envelopes["briglia-cli"]
+        legacy_payload = json.dumps({"channel": "ada-cli", "expires": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 90 * 86400)),
+                                     "platforms": {"ada-macos-arm64.tar.gz": {"sha256": sha(b"x"), "size": 1, "url": B + "/download/ada-cli/v0.1.58/ada-macos-arm64.tar.gz"}},
+                                     "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60)),
+                                     "schema": 1, "sequence": 999, "version": "0.1.58"}, sort_keys=True, indent=2).encode()
+        fake.envelopes["briglia-cli"] = raw_envelope(cli_key.priv, legacy_payload, "ada-cli", "ada-cli-release-v1-" + cli_key.fingerprint)
+        rc, out = run()
+        check("pre-rename `ada-cli` envelope (same key, retired keyId, higher sequence) served as latest → envelope-invalid, "
+              "floor untouched, never recorded",
+              rc == 2 and "briglia-cli/envelope-invalid" in out
+              and json.dumps(state()["recorded"], sort_keys=True) == st_before
+              and any("envelope-invalid" in m for m in fake.telegram), (out[-300:], fake.telegram))
+        fake.envelopes["briglia-cli"] = good
+        run(); fake.telegram.clear()
+        check("state untouched by the config-variant runs (separate state dirs)",
+              json.dumps(state()["recorded"], sort_keys=True) == st_before)
+
         # ------------------------------------------------- installer (macOS)
         if sys.platform == "darwin":
             print("— atomic, verified deployment (install_release_watch.sh with a launchctl shim) —")
             ihome = os.path.join(root, "ihome")
-            iroot = os.path.join(ihome, ".config", "ada-release-watch")
+            iroot = os.path.join(ihome, ".config", "briglia-release-watch")
             os.makedirs(iroot, mode=0o700)
             icfg = dict(cfg, state_dir=os.path.join(iroot, "state"))
             json.dump(icfg, open(os.path.join(iroot, "config.json"), "w"))
@@ -647,7 +712,7 @@ def main():
                 "if [ -f '%s' ] && echo \"$1 $2 ${3:-}\" | grep -Eq \"$(cat '%s')\"; then rm -f '%s'; echo 'injected launchctl failure' >&2; exit 1; fi\n"
                 "exit 0\n" % (ibin, shim_log, fail_file, fail_file, fail_file))
             os.chmod(os.path.join(shim_dir, "launchctl"), 0o755)
-            ienv = dict(os.environ, PATH=shim_dir + os.pathsep + os.environ["PATH"], ADA_WATCH_HOME=ihome)
+            ienv = dict(os.environ, PATH=shim_dir + os.pathsep + os.environ["PATH"], BRIGLIA_WATCH_HOME=ihome)
             installer = os.path.join(repo, "scripts", "install_release_watch.sh")
 
             def install():
@@ -672,7 +737,7 @@ def main():
             check("every bootstrap happens after the snapshot swap (bin.new absent)", all("bin.new=absent" in c for c in calls if c.startswith("bootstrap")), calls)
             check("both jobs were verified in the foreground before loading (beacon + heartbeat state present)",
                   os.path.exists(os.path.join(icfg["state_dir"], "check.beacon.json")) and os.path.exists(os.path.join(icfg["state_dir"], "heartbeat-state.json")))
-            plists = {k: open(os.path.join(ihome, "Library", "LaunchAgents", "com.permaevidence.ada-release-watch.%s.plist" % k)).read() for k in ("check", "heartbeat")}
+            plists = {k: open(os.path.join(ihome, "Library", "LaunchAgents", "com.permaevidence.briglia-release-watch.%s.plist" % k)).read() for k in ("check", "heartbeat")}
             check("plists: no RunAtLoad, checker runs release_watch.py check, heartbeat runs release_heartbeat.py",
                   all("<key>RunAtLoad</key><false/>" in p for p in plists.values())
                   and "<string>%s/release_watch.py</string><string>check</string>" % ibin in plists["check"]
@@ -697,8 +762,8 @@ def main():
             open(sp, "w").write(good_i); os.unlink(sp + ".prev")
             # activation failures (plist swap + launchctl) are part of the transaction too
             agents_dir = os.path.join(ihome, "Library", "LaunchAgents")
-            check_plist = os.path.join(agents_dir, "com.permaevidence.ada-release-watch.check.plist")
-            hb_plist = os.path.join(agents_dir, "com.permaevidence.ada-release-watch.heartbeat.plist")
+            check_plist = os.path.join(agents_dir, "com.permaevidence.briglia-release-watch.check.plist")
+            hb_plist = os.path.join(agents_dir, "com.permaevidence.briglia-release-watch.heartbeat.plist")
 
             def leftovers():
                 return [f for f in os.listdir(agents_dir) if f.endswith((".plist.new", ".plist.old"))]

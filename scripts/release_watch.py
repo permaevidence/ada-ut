@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Deterministic release-channel watcher (ada-cli RELEASE_SIGNING_PLAN.md §10).
+"""Deterministic release-channel watcher (briglia-cli RELEASE_SIGNING_PLAN.md §10).
 
-Re-verifies the two signed channels — Ada CLI and this app — the way a
+Re-verifies the two signed channels — Briglia CLI and this app — the way a
 client would, then cross-checks what GitHub says about them, and alerts a
 human over Telegram on ANY mismatch or inability to verify. Success is
 silent. No LLM is involved: every judgement here is a byte, hash, number
@@ -36,7 +36,7 @@ Per channel, `check`:
      whenever the recorded release changes, every asset is downloaded in
      full with the size bound and its SHA-256 compared;
   5. CLI only: the released install.sh must be byte-identical to
-     scripts/get-ada.sh at the exact release tag;
+     scripts/get-briglia.sh at the exact release tag;
   6. optional website checks: the CLI install command must resolve (via
      redirect) to the released installer bytes; the app page must link the
      exact click URL from the app manifest;
@@ -86,13 +86,18 @@ for _cand in (os.path.join(HERE, "py"), os.path.join(os.path.dirname(HERE), "py"
 import release_verify as rv  # noqa: E402
 
 WATCH_VERSION = "1"
-USER_AGENT = "ada-release-watch/" + WATCH_VERSION
+USER_AGENT = "briglia-release-watch/" + WATCH_VERSION
 MAX_SMALL_FETCH = 512 * 1024          # envelopes, installers, API JSON, pages
 MAX_PAGE_FETCH = 4 * 1024 * 1024
 FULL_HASH_INTERVAL = 24 * 3600
 
+# Every channel entry carries an explicit `kind` (cli | app). The kind — not
+# the channel NAME — selects the verification policy and the corroboration
+# path, and the pinned policy's channel must equal the config key; a stale
+# channel name therefore produces a loud config-invalid alert instead of a
+# silently skipped branch (rename plan §6).
 DEFAULT_CONFIG = {
-    "state_dir": "~/.config/ada-release-watch",
+    "state_dir": "~/.config/briglia-release-watch",
     "github_api": "https://api.github.com",
     "raw_base": "https://raw.githubusercontent.com",
     "telegram_env_file": "~/.claude/channels/telegram/.env",   # TELEGRAM_BOT_TOKEN, OWNER_CHAT_ID
@@ -101,18 +106,20 @@ DEFAULT_CONFIG = {
     "heartbeat_max_age_hours": 3,
     "expiry_warning_days": 30,
     "channels": {
-        "ada-cli": {
-            "repo": "permaevidence/ada-cli",
+        "briglia-cli": {
+            "kind": "cli",
+            "repo": "permaevidence/briglia-cli",
             "workflow_name": "Release (signed)",
             "installer_asset": "install.sh",
-            "installer_source": "scripts/get-ada.sh",
-            "website_install_url": "https://ada-app-psi.vercel.app/cli/install.sh",
+            "installer_source": "scripts/get-briglia.sh",
+            "website_install_url": "https://briglia.vercel.app/install.sh",
             "legacy_blob_manifest": None,
         },
-        "ada-ut": {
-            "repo": "permaevidence/ada-ut",
-            "publication_log": "~/.ada-release-keys/ada-ut-publications.jsonl",
-            "website_page_url": "https://ada-app-psi.vercel.app/app",
+        "briglia-ut": {
+            "kind": "app",
+            "repo": "permaevidence/briglia-ut",
+            "publication_log": "~/.briglia-release-keys/briglia-ut-publications.jsonl",
+            "website_page_url": "https://briglia.vercel.app/ubuntu-touch",
             "legacy_blob_manifest": None,
         },
     },
@@ -411,18 +418,18 @@ class Run:
             prev = active.get(key)
             if prev is None:
                 active[key] = {"first": now, "last_sent": now, "text": text}
-                messages.append("🚨 ada release watch — %s\n%s" % (key, text))
+                messages.append("🚨 briglia release watch — %s\n%s" % (key, text))
             elif now - prev["last_sent"] >= realert or prev.get("text") != text:
                 prev["last_sent"] = now
                 prev["text"] = text
-                messages.append("🚨 ada release watch — STILL FAILING since %s — %s\n%s"
+                messages.append("🚨 briglia release watch — STILL FAILING since %s — %s\n%s"
                                 % (iso(prev["first"]), key, text))
         for key in list(active):
             if key not in self.findings:
                 first = active.pop(key)["first"]
-                messages.append("✅ ada release watch — recovered: %s (failing since %s)" % (key, iso(first)))
+                messages.append("✅ briglia release watch — recovered: %s (failing since %s)" % (key, iso(first)))
         for text in self.infos:
-            messages.append("ℹ️ ada release watch — %s" % text)
+            messages.append("ℹ️ briglia release watch — %s" % text)
         # deliver queued first (oldest), then new; keep whatever fails
         pending = list(st["queued"]) + messages
         st["queued"] = []
@@ -438,9 +445,26 @@ class Run:
 
 # ---------------------------------------------------------- channel check
 
+CHANNEL_KINDS = {"cli": lambda: rv.CLI_POLICY, "app": lambda: rv.APP_POLICY}
+
+
+def channel_kind(cfg, channel):
+    """The configured kind of a channel; WatchError when it is missing or unknown."""
+    kind = cfg["channels"][channel].get("kind")
+    if kind not in CHANNEL_KINDS:
+        raise WatchError("channel %r: config declares no valid kind (cli|app) — refusing to guess which "
+                         "policy and corroboration apply" % channel)
+    return kind
+
+
 def policy_for(cfg, channel):
-    base = rv.CLI_POLICY if channel == "ada-cli" else rv.APP_POLICY
     chan = cfg["channels"][channel]
+    kind = channel_kind(cfg, channel)
+    base = CHANNEL_KINDS[kind]()
+    if base.channel != channel:
+        raise WatchError("channel %r is configured as kind %r, but the pinned %s policy in py/release_verify.py "
+                         "is for channel %r — the watcher config and the verifier disagree; fix the config "
+                         "(DEFAULT_CONFIG / config.json) before trusting any result" % (channel, kind, kind, base.channel))
     # Test/staging overrides only through the config file — never the environment.
     if chan.get("envelope_url") or chan.get("artifact_url_prefix"):
         return rv.ReleasePolicy(base.channel, {k: v.hex() for k, v in base.keys.items()},
@@ -507,7 +531,7 @@ def probe_asset(url, size):
 
 
 def full_hash(url, size, sha256):
-    with tempfile.NamedTemporaryFile(prefix="ada-watch-", delete=True) as tmp:
+    with tempfile.NamedTemporaryFile(prefix="briglia-watch-", delete=True) as tmp:
         err = rv.download_to_file(url, tmp.name, size, sha256, timeout=600)
     return err
 
@@ -568,8 +592,13 @@ def check_channel(cfg, channel, run, now):
     chan = cfg["channels"][channel]
     repo = chan["repo"]
     st = run.state.data
-    policy = policy_for(cfg, channel)
     print("— %s (%s) —" % (channel, repo))
+    try:
+        policy = policy_for(cfg, channel)
+        kind = channel_kind(cfg, channel)
+    except WatchError as exc:
+        run.alert(channel + "/config-invalid", str(exc))
+        return
 
     # 1. authenticate the live envelope
     try:
@@ -612,7 +641,7 @@ def check_channel(cfg, channel, run, now):
 
     # 2. compare with the recorded authorized release
     if rec is None or rec["sequence"] < live["sequence"]:
-        why = (corroborate_cli if channel == "ada-cli" else corroborate_app)(cfg, chan, run, live)
+        why = (corroborate_cli if kind == "cli" else corroborate_app)(cfg, chan, run, live)
         if why:
             run.alert(channel + "/uncorroborated-release",
                       "%s (sequence %d) is live but NOT corroborated: %s — not recorded"
@@ -769,7 +798,7 @@ def cmd_check(cfg):
         # No memory to run with: an empty state would silently discard the
         # rollback floor. Say so directly (no state needed to send) and stop;
         # the beacon goes stale, so the heartbeat repeats the alarm too.
-        text = ("🚨 ada release watch — REFUSING TO RUN: %s. The recorded rollback floor and queued alerts "
+        text = ("🚨 briglia release watch — REFUSING TO RUN: %s. The recorded rollback floor and queued alerts "
                 "are not available; restore state.json from a backup or re-seed only after verifying the live "
                 "releases by hand (runbook §8)." % exc)
         print("✖ %s" % exc)
@@ -811,7 +840,7 @@ def main(argv=None):
     ap.add_argument("--config", help="JSON config overriding DEFAULT_CONFIG")
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
-    print("ada release watch v%s — %s — %s" % (WATCH_VERSION, args.command, iso(now_ts())))
+    print("briglia release watch v%s — %s — %s" % (WATCH_VERSION, args.command, iso(now_ts())))
     try:
         return {"check": cmd_check, "status": cmd_status}[args.command](cfg)
     except WatchError as exc:
