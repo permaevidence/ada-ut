@@ -424,10 +424,17 @@ def main():
 
         print("— legacy transition: the one accepted state —")
         stamp(2, "0.7.5")
+        # Two supersession reads see the legacy floor; after publication the
+        # latest pointer still serves the legacy envelope twice (GitHub's
+        # propagation lag, measured live in the Stage-7 rehearsal), then
+        # catches up.
+        gh.faults["latest_queue"] = [legacy_envelope()] * 4
         rc, out = run()
         rel = gh.by_tag("v0.7.5")
         check("sequence 2 over the authenticated legacy sequence 1 publishes",
               rc == 0 and rel is not None and rel["draft"] is False and "LEGACY ada-ut envelope" in out, out)
+        check("latest still serving the legacy envelope after publication is waited out (twice), not treated as a mismatch",
+              out.count("latest still serves the pre-rename legacy envelope") == 2 and "public state verified" in out, out)
         check("assets uploaded in order, envelope last",
               rel and rel["order"] == ["briglia.permaevidence_0.7.5_all.click", "manifest.json", "manifest.sig.json"],
               rel and rel["order"])
@@ -631,6 +638,42 @@ def main():
         check("publish-github-release.sh with a branch name instead of a commit SHA refuses",
               p.returncode != 0 and "full 40-hex commit SHA" in p.stdout + p.stderr and len(posts()) == posts_before,
               p.stdout + p.stderr)
+        print("— public propagation window (step 6) —")
+        live_env = gh.latest()["assets"]["manifest.sig.json"]
+        stamp(17, "0.7.20")
+        gh.faults["latest_queue"] = [live_env] * 4   # 2 supersession reads + 2 stale step-6 reads, then the real latest
+        before = len(log_lines())
+        rc, out = run()
+        check("latest pointer lag: the authenticated previous release seen twice after publish → waited out, then recorded",
+              rc == 0 and out.count("latest still serves the previous release") == 2 and len(log_lines()) == before + 1
+              and json.loads(log_lines()[-1])["sequence"] == 17, out)
+        foreign_env = raw_envelope(other.priv, legacy_manifest(), "briglia-ut", other.key_id)
+        stamp(18, "0.7.21")
+        gh.faults["latest_queue"] = [gh.by_tag("v0.7.20")["assets"]["manifest.sig.json"]] * 2 + [foreign_env]
+        before = len(log_lines())
+        rc, out = run()
+        check("step 6 sees an envelope that is neither ours nor an authenticated previous state → hard stop, release live but NOT recorded",
+              rc != 0 and "neither this release nor an authenticated previous state" in out and "NOT recorded" in out
+              and len(log_lines()) == before and gh.by_tag("v0.7.21") and not gh.by_tag("v0.7.21")["draft"], out)
+        stamp(19, "0.7.22")
+        gh.faults["latest_queue"] = [gh.by_tag("v0.7.20")["assets"]["manifest.sig.json"]] * 8
+        before = len(log_lines())
+        rc, out = run(PUBLIC_PROPAGATION_ATTEMPTS="3")
+        check("latest never catches up within the bounded window → hard stop naming the live release, NOT recorded",
+              rc != 0 and "still serves the previous release" in out and "live and immutable but NOT recorded" in out
+              and len(log_lines()) == before and gh.by_tag("v0.7.22") and not gh.by_tag("v0.7.22")["draft"], out)
+        gh.faults.pop("latest_queue", None)
+        stamp(20, "0.7.23")
+        newer = raw_envelope(key.priv, json.dumps({"channel": "briglia-ut", "schema": 1, "sequence": 99, "version": "9.9.9",
+                              "published": "2026-09-01T00:00:00Z", "expires": "2027-09-01T00:00:00Z",
+                              "platforms": {"click": {"url": gh.base + "/download/v9.9.9/x.click", "size": 1, "sha256": "ab" * 32}}},
+                             sort_keys=True, indent=2).encode(), "briglia-ut", key.key_id)
+        gh.faults["latest_queue"] = [gh.by_tag("v0.7.20")["assets"]["manifest.sig.json"]] * 2 + [newer]
+        before = len(log_lines())
+        rc, out = run()
+        check("step 6 sees an authenticated NEWER sibling → hard stop (never waited out), NOT recorded",
+              rc != 0 and "a sibling publication got ahead" in out and len(log_lines()) == before, out)
+        gh.faults.pop("latest_queue", None)
         check("every publication in the log is monotonic",
               [json.loads(l)["sequence"] for l in log_lines()] == sorted({json.loads(l)["sequence"] for l in log_lines()}),
               log_lines())

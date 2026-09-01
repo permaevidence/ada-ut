@@ -306,8 +306,16 @@ GH_API_URL="$API" GH_UPLOADS_URL="$UPLOADS" \
     "$RELEASE_SCRIPTS/publish-github-release.sh"
 RELEASE_ID="$(cat "$WORK/release-id")"
 
-# --- 6. re-verify the PUBLIC state, byte for byte
-fetch_public() {  # url out — `latest` can lag a few seconds after publish
+# --- 6. re-verify the PUBLIC state, byte for byte. GitHub's `latest`
+# pointer lags a just-published release by up to a couple of minutes
+# (measured in the Stage-7 rehearsal, 2026-09-01: the release was live and
+# immutable while latest/download still served the previous envelope). An
+# AUTHENTICATED previous state — the release we just superseded, or the
+# pre-rename legacy envelope during the transition — means "not yet", and we
+# wait, bounded. Anything else served is a hard stop, never waited out; and
+# a hard stop here leaves the release live but NOT recorded, so the message
+# says so.
+fetch_public() {  # url out
     local url="$1" out="$2" attempt status
     for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
         status="$(curl -sSL --max-filesize 33554432 -o "$out" -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
@@ -316,9 +324,29 @@ fetch_public() {  # url out — `latest` can lag a few seconds after publish
     done
     echo "✖ public fetch of $url failed (last HTTP $status)"; return 1
 }
-fetch_public "$LIVE_URL" "$WORK/public.sig.json"
-cmp -s "$WORK/public.sig.json" "$DIST/manifest.sig.json" || {
-    echo "✖ the public LATEST envelope is not byte-identical to what was just signed — investigate before anything else"; exit 1; }
+PROPAGATION_ATTEMPTS="${PUBLIC_PROPAGATION_ATTEMPTS:-60}"   # × PUBLIC_RETRY_SLEEP (5s) = 5 minutes
+attempt=0
+while :; do
+    fetch_public "$LIVE_URL" "$WORK/public.sig.json"
+    cmp -s "$WORK/public.sig.json" "$DIST/manifest.sig.json" && break
+    if "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/public.sig.json" "$EXPECTED_PUB" "$CHANNEL" "$WORK/public-payload.json" >/dev/null 2>&1; then
+        PUB_SEQ="$(python3 -c "import json;print(json.load(open('$WORK/public-payload.json'))['sequence'])")"
+        PUB_VER="$(python3 -c "import json;print(json.load(open('$WORK/public-payload.json'))['version'])")"
+        [[ "$PUB_SEQ" =~ ^[1-9][0-9]*$ ]] && [ "$PUB_SEQ" -lt "$SEQUENCE" ] || {
+            echo "✖ the public LATEST envelope authenticates but is NOT this release (v$PUB_VER sequence $PUB_SEQ; ours v$VERSION sequence $SEQUENCE) — a sibling publication got ahead; release $RELEASE_ID is live but NOT recorded; investigate before anything else"; exit 1; }
+        WHAT="the previous release (authenticated v$PUB_VER, sequence $PUB_SEQ)"
+    elif "$RELEASE_SCRIPTS/verify-envelope.sh" "$WORK/public.sig.json" "$EXPECTED_PUB" "$LEGACY_CHANNEL" "$WORK/public-payload.json" >/dev/null 2>&1 \
+         && legacy_payload_matches "$WORK/public-payload.json" >/dev/null 2>&1; then
+        WHAT="the pre-rename legacy envelope"
+    else
+        echo "✖ the public LATEST envelope is neither this release nor an authenticated previous state — release $RELEASE_ID is live but NOT recorded; investigate before anything else"; exit 1
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$PROPAGATION_ATTEMPTS" ] || {
+        echo "✖ the public LATEST still serves $WHAT after $PROPAGATION_ATTEMPTS attempts — release $RELEASE_ID ($TAG) is live and immutable but NOT recorded; once https://github.com/$REPO/releases/latest points at $TAG, re-verify and record it by hand (RELEASE_RUNBOOKS.md)"; exit 1; }
+    echo "  …latest still serves $WHAT — waiting for GitHub's latest pointer (attempt $attempt)"
+    sleep "${PUBLIC_RETRY_SLEEP:-5}"
+done
 fetch_public "$DOWNLOAD_BASE/v$VERSION/$FILENAME" "$WORK/public.click"
 cmp -s "$WORK/public.click" "$CLICK" || { echo "✖ the public click differs from the built one"; exit 1; }
 REL_STATUS="$(curl -sS -o "$WORK/rel.json" -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
