@@ -11,8 +11,8 @@ app version, device/channel, and reproduction steps.
 
 ## Scope
 
-The Ada Companion app for Ubuntu Touch is an unconfined installer and
-control panel for Ada CLI; it runs with the permissions of the user who
+The Briglia Companion app for Ubuntu Touch is an unconfined installer and
+control panel for Briglia CLI; it runs with the permissions of the user who
 installs it, by design. Reports we consider in scope include:
 
 - The install/update chain: release-signature verification bypasses

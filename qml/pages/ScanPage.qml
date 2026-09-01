@@ -468,7 +468,7 @@ Page {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     textSize: Label.Small
-                    text: i18n.tr("Diagnostics (saves camera frames to Documents/ada-qr-debug)")
+                    text: i18n.tr("Diagnostics (saves camera frames to Documents/briglia-qr-debug)")
                 }
             }
 

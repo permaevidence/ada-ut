@@ -118,7 +118,7 @@ Page {
                 wrapMode: Text.WordWrap
                 textSize: Label.Small
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("Ada uses it to address you. The assistant's own name stays \"Ada\".")
+                text: i18n.tr("Briglia uses it to address you. The assistant's own name stays \"Bree\" (you can change it).")
             }
             TextField {
                 id: nameField
@@ -157,7 +157,7 @@ Page {
                 color: theme.palette.normal.backgroundSecondaryText
                 text: {
                     var current = page.email ? page.email.provider : "none";
-                    var line = i18n.tr("Optional: give Ada an inbox and calendar. AgentMail is a dedicated agent inbox (recommended); Google Workspace needs your own Google OAuth client.");
+                    var line = i18n.tr("Optional: give Briglia an inbox and calendar. AgentMail is a dedicated agent inbox (recommended); Google Workspace needs your own Google OAuth client.");
                     if (current === "agentmail" && page.email.agentmail_inbox)
                         line += "\n" + i18n.tr("Current: AgentMail (%1)").arg(page.email.agentmail_inbox);
                     else if (current !== "none")

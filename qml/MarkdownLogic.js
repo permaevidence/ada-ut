@@ -1,9 +1,9 @@
 // Markdown -> Qt RichText for assistant chat bubbles (field test,
-// 2026-08-28: Ada's replies showed ** and backticks literally).
+// 2026-08-28: Briglia's replies showed ** and backticks literally).
 //
 // Deliberately NOT a CommonMark renderer: chat replies use single
 // newlines literally, and CommonMark's newline collapsing would mangle
-// them. This converts only the subset Ada actually emits — bold,
+// them. This converts only the subset Briglia actually emits — bold,
 // *italic*, `inline code`, fenced code blocks, #headers, bullet lists,
 // [links](url) — and passes everything else through HTML-escaped with
 // newlines preserved as <br/>. User/command bubbles are never converted:

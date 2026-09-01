@@ -4,7 +4,7 @@
 Covers: the pure-Python Ed25519 verifier (RFC 8032 known answers, strict
 encodings, cross-check against an independent OpenSSL over fresh random
 signatures), the system-OpenSSL provider, the full envelope/manifest
-rejection matrix mirrored from the Ada CLI's verifier, the locked
+rejection matrix mirrored from the Briglia CLI's verifier, the locked
 monotonic anti-rollback store (concurrent writers, lock contention,
 corrupt/legacy files, domain isolation), bounded fetches and authenticated
 streaming downloads against a lying server, and end-to-end resolution.
@@ -78,7 +78,7 @@ def _lock_holder(args):
 
 
 def main():
-    root = tempfile.mkdtemp(prefix="ada-ut-release-selftest-")
+    root = tempfile.mkdtemp(prefix="briglia-ut-release-selftest-")
     rv.TRUST_FILE = os.path.join(root, "trust", "release_trust.json")
     now = 1_800_000_000.0  # 2027-01-15 — fixtures expire 2099, published 2026
     ossl = resolve_openssl()
@@ -141,18 +141,18 @@ def main():
 
     # ------------------------------------------------ 2. envelope matrix
     print("— envelope + manifest matrix —")
-    cli_key = TestKey("ada-cli")
-    app_key = TestKey("ada-ut")
+    cli_key = TestKey("briglia-cli")
+    app_key = TestKey("briglia-ut")
     prefix = "https://example.invalid/dl/v{version}/"
-    policy = rv.ReleasePolicy("ada-cli", cli_key.keys(),
+    policy = rv.ReleasePolicy("briglia-cli", cli_key.keys(),
                               "https://example.invalid/latest/manifest.sig.json", prefix, 1)
-    plat = {"linux-arm64": {"url": "https://example.invalid/dl/v1.2.3/ada-linux-arm64.tar.gz",
+    plat = {"linux-arm64": {"url": "https://example.invalid/dl/v1.2.3/briglia-linux-arm64.tar.gz",
                             "size": 12345, "sha256": "ab" * 32}}
-    good_manifest = manifest_bytes("ada-cli", "1.2.3", 7, plat)
+    good_manifest = manifest_bytes("briglia-cli", "1.2.3", 7, plat)
     good = cli_key.sign(good_manifest)
     m = rv.verify_envelope(good, policy, now)
     check("valid envelope verifies", m["version"] == "1.2.3" and m["sequence"] == 7
-          and m["keyId"] == cli_key.key_id and m["platforms"]["linux-arm64"]["filename"] == "ada-linux-arm64.tar.gz")
+          and m["keyId"] == cli_key.key_id and m["platforms"]["linux-arm64"]["filename"] == "briglia-linux-arm64.tar.gz")
     env = json.loads(good)
 
     def mutated(**changes):
@@ -167,26 +167,37 @@ def main():
     sig_raw[5] ^= 1
     expect("bad-signature", lambda: rv.verify_envelope(mutated(signature=base64.b64encode(bytes(sig_raw)).decode()), policy, now),
            "altered signature → bad-signature")
-    expect("unknown-key", lambda: rv.verify_envelope(mutated(keyId="ada-cli-release-v1-0000000000000000"), policy, now),
+    expect("unknown-key", lambda: rv.verify_envelope(mutated(keyId="briglia-cli-release-v1-0000000000000000"), policy, now),
            "unknown keyId refused")
     expect("bad-signature", lambda: rv.verify_envelope(mutated(keyId=cli_key.key_id), rv.ReleasePolicy(
-        "ada-cli", {cli_key.key_id: app_key.pub_hex}, policy.envelope_url, prefix, 1), now),
+        "briglia-cli", {cli_key.key_id: app_key.pub_hex}, policy.envelope_url, prefix, 1), now),
            "right keyId, wrong pinned key → bad-signature")
     expect("unsupported-format", lambda: rv.verify_envelope(mutated(format="ada-release-envelope-v2"), policy, now),
            "unsupported format refused")
-    expect("wrong-channel", lambda: rv.verify_envelope(mutated(channel="ada-ut"), policy, now),
+    expect("wrong-channel", lambda: rv.verify_envelope(mutated(channel="briglia-ut"), policy, now),
            "envelope channel mismatch refused")
-    cross = app_key.sign(manifest_bytes("ada-ut", "1.2.3", 7, plat))
+    cross = app_key.sign(manifest_bytes("briglia-ut", "1.2.3", 7, plat))
     expect("wrong-channel", lambda: rv.verify_envelope(cross, policy, now),
-           "cross-channel envelope (app key, ada-ut channel) refused by the CLI policy")
+           "cross-channel envelope (app key, briglia-ut channel) refused by the CLI policy")
     relabelled = json.loads(cross)
-    relabelled["channel"] = "ada-cli"
+    relabelled["channel"] = "briglia-cli"
     relabelled["keyId"] = cli_key.key_id
     expect("bad-signature", lambda: rv.verify_envelope(json.dumps(relabelled).encode(), policy, now),
            "relabelled cross-channel envelope → bad-signature (domain separation)")
     expect("malformed-envelope", lambda: rv.verify_envelope(mutated(payload=env["payload"] + " "), policy, now),
            "non-strict base64 payload refused")
-    expect("malformed-envelope", lambda: rv.verify_envelope(mutated(payload=env["payload"].rstrip("=")), policy, now),
+    # Use a payload whose base64 really carries padding (length ≢ 0 mod 3):
+    # the good envelope's payload length depends on the channel-name length,
+    # and a padding-free payload made the old rstrip("=") a silent no-op.
+    padded = None
+    for probe_version in ("1.2.3", "1.2.30", "1.2.300"):
+        candidate = json.loads(cli_key.sign(manifest_bytes("briglia-cli", probe_version, 7, plat)))
+        if candidate["payload"].endswith("="):
+            padded = candidate
+            break
+    check("fixture: found a padded base64 payload for the padding test", padded is not None)
+    padded["payload"] = padded["payload"].rstrip("=")
+    expect("malformed-envelope", lambda: rv.verify_envelope(json.dumps(padded).encode(), policy, now),
            "non-canonical base64 (missing padding) refused")
     expect("malformed-envelope", lambda: rv.verify_envelope(mutated(signature=base64.b64encode(b"x" * 63).decode()), policy, now),
            "63-byte signature refused")
@@ -197,16 +208,16 @@ def main():
            "payload over 64 KiB refused before signature work")
     expect("malformed-envelope", lambda: rv.verify_envelope(b"not json", policy, now), "non-JSON envelope refused")
     expect("malformed-envelope", lambda: rv.verify_envelope(b"[1,2]", policy, now), "non-object envelope refused")
-    expect("no-keys", lambda: rv.verify_envelope(good, rv.ReleasePolicy("ada-cli", {}, "", prefix, 1), now),
+    expect("no-keys", lambda: rv.verify_envelope(good, rv.ReleasePolicy("briglia-cli", {}, "", prefix, 1), now),
            "policy without keys refuses everything")
 
     def signed(version="1.2.3", sequence=7, platforms=None, **kw):
-        return cli_key.sign(manifest_bytes("ada-cli", version, sequence,
+        return cli_key.sign(manifest_bytes("briglia-cli", version, sequence,
                                            plat if platforms is None else platforms, **kw))
     expect("malformed-manifest", lambda: rv.verify_envelope(signed(schema=2), policy, now), "schema 2 refused")
     expect("malformed-manifest", lambda: rv.verify_envelope(signed(schema=True), policy, now), "schema true (bool) refused")
     expect("wrong-channel", lambda: rv.verify_envelope(
-        cli_key.sign(manifest_bytes("ada-ut", "1.2.3", 7, plat), channel="ada-cli"), policy, now),
+        cli_key.sign(manifest_bytes("briglia-ut", "1.2.3", 7, plat), channel="briglia-cli"), policy, now),
         "payload channel mismatch refused even with a valid signature")
     expect("malformed-manifest", lambda: rv.verify_envelope(signed(sequence=0), policy, now), "sequence 0 refused")
     expect("malformed-manifest", lambda: rv.verify_envelope(signed(sequence=True), policy, now), "sequence true refused")
@@ -257,7 +268,7 @@ def main():
 
     # ------------------------------------------------ 3. trust store
     print("— anti-rollback trust store —")
-    dom_a, dom_b = "ada-cli|https://a/v{version}/", "ada-cli|https://b/v{version}/"
+    dom_a, dom_b = "briglia-cli|https://a/v{version}/", "briglia-cli|https://b/v{version}/"
     check("absent file → floor 0, no note", rv.trust_floor(dom_a) == (0, None))
     rv.trust_record(dom_a, 58)
     check("recorded floor read back", rv.trust_floor(dom_a)[0] == 58)
@@ -337,8 +348,8 @@ def main():
     rv.TRUST_FILE = os.path.join(root, "trust2", "release_trust.json")
     live_prefix = host.base + "/dl/v{version}/"
     live_platforms = {"linux-arm64": {"url": host.base + "/dl/v1.2.3/a.bin", "size": len(art), "sha256": art_sha}}
-    env_url = host.put("/latest/manifest.sig.json", cli_key.sign(manifest_bytes("ada-cli", "1.2.3", 60, live_platforms)))
-    live = rv.ReleasePolicy("ada-cli", cli_key.keys(), env_url, live_prefix, 58)
+    env_url = host.put("/latest/manifest.sig.json", cli_key.sign(manifest_bytes("briglia-cli", "1.2.3", 60, live_platforms)))
+    live = rv.ReleasePolicy("briglia-cli", cli_key.keys(), env_url, live_prefix, 58)
     m = rv.resolve_release(live, now)
     check("live envelope resolves with floor = embedded minimum",
           m["sequence"] == 60 and m["floor"] == 58 and m["trust_note"] is None)
@@ -346,17 +357,17 @@ def main():
     check("accepted sequence persisted under the channel|prefix domain",
           rv.trust_floor(live.trust_domain)[0] == 60)
     older_platforms = {"linux-arm64": {"url": host.base + "/dl/v1.2.2/a.bin", "size": len(art), "sha256": art_sha}}
-    host.put("/latest/manifest.sig.json", cli_key.sign(manifest_bytes("ada-cli", "1.2.2", 59, older_platforms)))
+    host.put("/latest/manifest.sig.json", cli_key.sign(manifest_bytes("briglia-cli", "1.2.2", 59, older_platforms)))
     expect("rollback", lambda: rv.resolve_release(live, now), "older sequence than the recorded floor → rollback")
-    host.put("/latest/manifest.sig.json", cli_key.sign(manifest_bytes("ada-cli", "1.2.3", 60, live_platforms)))
+    host.put("/latest/manifest.sig.json", cli_key.sign(manifest_bytes("briglia-cli", "1.2.3", 60, live_platforms)))
     check("equal sequence (same release) still resolves", rv.resolve_release(live, now)["sequence"] == 60)
-    stale = rv.ReleasePolicy("ada-cli", cli_key.keys(), env_url, live_prefix, 61)
+    stale = rv.ReleasePolicy("briglia-cli", cli_key.keys(), env_url, live_prefix, 61)
     expect("rollback", lambda: rv.resolve_release(stale, now), "below the embedded minimum → rollback")
-    other = rv.ReleasePolicy("ada-cli", cli_key.keys(), env_url, "https://other.invalid/v{version}/", 1)
+    other = rv.ReleasePolicy("briglia-cli", cli_key.keys(), env_url, "https://other.invalid/v{version}/", 1)
     expect("bad-platform", lambda: rv.resolve_release(other, now),
            "same envelope under a different pinned location → assets outside prefix")
     check("different location has an independent floor", rv.trust_floor(other.trust_domain)[0] == 0)
-    gone = rv.ReleasePolicy("ada-cli", cli_key.keys(), host.base + "/nope.json", live_prefix, 1)
+    gone = rv.ReleasePolicy("briglia-cli", cli_key.keys(), host.base + "/nope.json", live_prefix, 1)
     expect("unreachable", lambda: rv.resolve_release(gone, now), "missing envelope → unreachable")
     host.put("/latest/manifest.sig.json", b"{" + b" " * rv.MAX_ENVELOPE_BYTES + b"}")
     expect("too-large", lambda: rv.resolve_release(live, now), "oversized live envelope → too-large")
@@ -366,21 +377,21 @@ def main():
 
     # ------------------------------------------------ 6. production pins
     print("— production pins —")
-    check("CLI policy pins the Ada CLI release key",
-          "ada-cli-release-v1-94d967bae0867c2e" in rv.CLI_POLICY.keys and rv.CLI_POLICY.min_sequence >= 58)
+    check("CLI policy pins the Briglia CLI release key",
+          "briglia-cli-release-v1-94d967bae0867c2e" in rv.CLI_POLICY.keys and rv.CLI_POLICY.min_sequence >= 60)
     check("app policy pins this app's release key",
-          "ada-ut-release-v1-7bb0163ac16c5cb3" in rv.APP_POLICY.keys)
-    committed = os.path.join(os.path.dirname(HERE), ".release-keys", "ada-ut-release.pub.pem")
+          "briglia-ut-release-v1-7bb0163ac16c5cb3" in rv.APP_POLICY.keys)
+    committed = os.path.join(os.path.dirname(HERE), ".release-keys", "briglia-ut-release.pub.pem")
     if ossl and os.path.exists(committed):
         der = subprocess.run([ossl, "pkey", "-pubin", "-in", committed, "-outform", "DER"],
                              check=True, capture_output=True).stdout
         check("pinned app key hex == committed .release-keys PEM",
-              der[-32:].hex() == rv.APP_KEYS["ada-ut-release-v1-7bb0163ac16c5cb3"])
+              der[-32:].hex() == rv.APP_KEYS["briglia-ut-release-v1-7bb0163ac16c5cb3"])
         fp = hashlib.sha256(der[-32:]).hexdigest()[:16]
         check("app keyId fingerprint matches the key", fp == "7bb0163ac16c5cb3", fp)
     check("channels point at GitHub Releases of the two public repos",
-          rv.CLI_POLICY.envelope_url.startswith("https://github.com/permaevidence/ada-cli/releases/latest/")
-          and rv.APP_POLICY.artifact_url_prefix.startswith("https://github.com/permaevidence/ada-ut/releases/download/v"))
+          rv.CLI_POLICY.envelope_url.startswith("https://github.com/permaevidence/briglia-cli/releases/latest/")
+          and rv.APP_POLICY.artifact_url_prefix.startswith("https://github.com/permaevidence/briglia-ut/releases/download/v"))
     check("app build's own sequence is a positive integer ≥ the app minimum",
           isinstance(rv.APP_RELEASE_SEQUENCE, int) and rv.APP_RELEASE_SEQUENCE >= rv.MIN_APP_SEQUENCE)
     check("no environment overrides for keys/urls/openssl in release_verify",

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Publish a built .click as an IMMUTABLE, SIGNED GitHub Release of
-# permaevidence/ada-ut (docs: ada-cli RELEASE_SIGNING_PLAN.md §9.3).
+# permaevidence/briglia-ut (docs: briglia-cli RELEASE_SIGNING_PLAN.md §9.3).
 #
 #   scripts/publish_click.sh [--bootstrap] [--dry-run] [--allow-dirty] [version]
 #
@@ -34,10 +34,10 @@
 # — a pre-existing tag naming any other commit is a refusal, because GitHub
 # keeps an existing tag and silently ignores target_commitish.
 #
-# Env: SIGNING_KEY  private key PEM (default ~/.ada-release-keys/<keyId>.priv.pem
+# Env: SIGNING_KEY  private key PEM (default ~/.briglia-release-keys/<keyId>.priv.pem
 #                   where keyId is derived from the committed public key)
-#      EXPECTED_PUB committed public key (default .release-keys/ada-ut-release.pub.pem)
-#      GH_TOKEN     (default: `gh auth token`), REPO (default permaevidence/ada-ut)
+#      EXPECTED_PUB committed public key (default .release-keys/briglia-ut-release.pub.pem)
+#      GH_TOKEN     (default: `gh auth token`), REPO (default permaevidence/briglia-ut)
 #      GH_API_URL / GH_UPLOADS_URL / PUBLIC_DOWNLOAD_BASE / LIVE_ENVELOPE_URL /
 #      PUBLICATION_LOG / PUBLISHED_AT / EXPIRES_DAYS / REPO_ROOT /
 #      PUBLISH_LOCK — overrides for the selftest.
@@ -45,12 +45,12 @@ set -euo pipefail
 
 # --- exclusive publisher lock (re-exec under a python flock holder; the
 # lock fd is inherited across exec and released when this process exits).
-if [ -z "${ADA_UT_PUBLISH_LOCKED:-}" ]; then
-    export ADA_UT_PUBLISH_LOCK_PATH="${PUBLISH_LOCK:-$HOME/.ada-release-keys/ada-ut-publish.lock}"
+if [ -z "${BRIGLIA_UT_PUBLISH_LOCKED:-}" ]; then
+    export BRIGLIA_UT_PUBLISH_LOCK_PATH="${PUBLISH_LOCK:-$HOME/.briglia-release-keys/briglia-ut-publish.lock}"
     exec python3 - "$0" "$@" <<'PYEOF'
 import fcntl, os, sys
 script, args = sys.argv[1], sys.argv[2:]
-path = os.environ["ADA_UT_PUBLISH_LOCK_PATH"]
+path = os.environ["BRIGLIA_UT_PUBLISH_LOCK_PATH"]
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
 try:
@@ -59,7 +59,7 @@ except BlockingIOError:
     print("✖ another publish_click.sh run holds the publisher lock (%s) — refusing to run concurrently" % path)
     sys.exit(1)
 os.set_inheritable(fd, True)
-os.environ["ADA_UT_PUBLISH_LOCKED"] = "1"
+os.environ["BRIGLIA_UT_PUBLISH_LOCKED"] = "1"
 os.execv("/bin/bash", ["/bin/bash", script] + args)
 PYEOF
 fi
@@ -76,16 +76,16 @@ for arg in "$@"; do
 done
 
 cd "${REPO_ROOT:-$(dirname "$0")/..}"
-REPO="${REPO:-permaevidence/ada-ut}"
+REPO="${REPO:-permaevidence/briglia-ut}"
 API="${GH_API_URL:-https://api.github.com}"
 UPLOADS="${GH_UPLOADS_URL:-https://uploads.github.com}"
 DOWNLOAD_BASE="${PUBLIC_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
 LIVE_URL="${LIVE_ENVELOPE_URL:-https://github.com/$REPO/releases/latest/download/manifest.sig.json}"
-EXPECTED_PUB="${EXPECTED_PUB:-.release-keys/ada-ut-release.pub.pem}"
-LOG="${PUBLICATION_LOG:-$HOME/.ada-release-keys/ada-ut-publications.jsonl}"
+EXPECTED_PUB="${EXPECTED_PUB:-.release-keys/briglia-ut-release.pub.pem}"
+LOG="${PUBLICATION_LOG:-$HOME/.briglia-release-keys/briglia-ut-publications.jsonl}"
 RELEASE_SCRIPTS="scripts/release"
-CHANNEL="ada-ut"
-TITLE="Ada for Ubuntu Touch"
+CHANNEL="briglia-ut"
+TITLE="Briglia for Ubuntu Touch"
 
 [ -f "$EXPECTED_PUB" ] || { echo "✖ committed public key missing: $EXPECTED_PUB"; exit 1; }
 # shellcheck source=release/openssl-resolve.sh
@@ -101,7 +101,7 @@ tail -c 32 "$WORK/pub.der" > "$WORK/pub.raw"
 PUB_HEX="$(ossl_hex "$WORK/pub.raw")"
 FP="$("$OPENSSL" dgst -sha256 -hex < "$WORK/pub.raw" | awk '{print $NF}')"
 KEYID="$CHANNEL-release-v1-${FP:0:16}"
-SIGNING_KEY="${SIGNING_KEY:-$HOME/.ada-release-keys/$KEYID.priv.pem}"
+SIGNING_KEY="${SIGNING_KEY:-$HOME/.briglia-release-keys/$KEYID.priv.pem}"
 [ -f "$SIGNING_KEY" ] || { echo "✖ signing key not found: $SIGNING_KEY (custody: plan §4.1)"; exit 1; }
 PERM="$(stat -f %Lp "$SIGNING_KEY" 2>/dev/null || stat -c %a "$SIGNING_KEY")"
 [ "$PERM" = "600" ] || { echo "✖ signing key $SIGNING_KEY must be mode 0600 (is $PERM)"; exit 1; }
@@ -167,7 +167,11 @@ echo "release $TAG (sequence $SEQUENCE, key $KEYID, commit ${HEAD_SHA:0:12})"
 
 # --- 2. deterministic build
 python3 scripts/build_click.py >/dev/null
-CLICK="build/ada.permaevidence_${VERSION}_all.click"
+# The click filename is DERIVED from manifest.json exactly like build_click.py
+# derives it (package name + version) — a hardcoded name here and a derived
+# one there is how a rename silently publishes nothing (plan §5).
+PKG_NAME="$(python3 -c "import json;print(json.load(open('manifest.json'))['name'])")"
+CLICK="build/${PKG_NAME}_${VERSION}_all.click"
 [ -f "$CLICK" ] || { echo "✖ build did not produce $CLICK"; exit 1; }
 FILENAME="$(basename "$CLICK")"
 SHA256="$("$OPENSSL" dgst -sha256 -hex < "$CLICK" | awk '{print $NF}')"
@@ -188,7 +192,7 @@ now = (datetime.datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tz
        if published_at else datetime.datetime.now(datetime.timezone.utc))
 fmt = "%Y-%m-%dT%H:%M:%SZ"
 print(json.dumps({
-    "channel": "ada-ut",
+    "channel": "briglia-ut",
     "expires": (now + datetime.timedelta(days=int(days))).strftime(fmt),
     "platforms": {"click": {"sha256": sha, "size": int(size), "url": url}},
     "published": now.strftime(fmt),
@@ -208,7 +212,7 @@ import sys, os
 sys.path.insert(0, "py")
 import release_verify as rv
 env_path, key_id, pub_hex, base, seq, version, sha, size = sys.argv[1:9]
-policy = rv.ReleasePolicy("ada-ut", {key_id: pub_hex},
+policy = rv.ReleasePolicy("briglia-ut", {key_id: pub_hex},
                           base + "/latest/manifest.sig.json", base + "/v{version}/", 1)
 m = rv.verify_envelope(open(env_path, "rb").read(), policy)
 entry = m["platforms"]["click"]

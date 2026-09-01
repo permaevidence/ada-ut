@@ -201,7 +201,7 @@ Page {
                 wrapMode: Text.WordWrap
                 color: theme.palette.normal.backgroundSecondaryText
                 text: page.wizardMode
-                      ? i18n.tr("Pick the service that runs Ada's main intelligence. OpenCode is the recommended default.")
+                      ? i18n.tr("Pick the service that runs Briglia's main intelligence. OpenCode is the recommended default.")
                       : i18n.tr("Each profile keeps its own settings. Saving the active profile applies immediately; another profile takes over only if you activate it.")
             }
 
@@ -228,7 +228,7 @@ Page {
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
                         textSize: Label.Small
-                        text: i18n.tr("Have your API keys on a computer? Open ada-app-psi.vercel.app/qr there, paste them, and scan the generated codes once — every key field in this setup fills itself.")
+                        text: i18n.tr("Have your API keys on a computer? Open %1/qr there, paste them, and scan the generated codes once — every key field in this setup fills itself.").arg(page.app.websiteBase.replace("https://", ""))
                     }
                     Button {
                         Layout.fillWidth: true

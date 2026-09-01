@@ -1,7 +1,7 @@
 #!/bin/bash
 # Publish ONE immutable GitHub Release for a tag: assemble a draft, upload
 # every asset with the signed envelope LAST, then flip the draft live in a
-# single PATCH with explicit make_latest. Generic twin of ada-cli's
+# single PATCH with explicit make_latest. Generic twin of briglia-cli's
 # .github/scripts/publish-release.sh (same logic, assets passed in), used by
 # scripts/publish_click.sh and exercised against a fake Releases API by
 # scripts/publish_selftest.py.

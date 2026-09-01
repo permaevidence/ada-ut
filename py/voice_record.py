@@ -6,8 +6,8 @@ image ships GStreamer and PulseAudio — so recording is a supervised
 fallback. `-e` + SIGINT makes GStreamer emit EOS and finalize the container,
 so a stopped recording is a valid file, not a truncated stream.
 
-The recorded file is handed to Ada over the chat socket (`voice` request);
-Ada transcribes it and the app deletes the file after the ack/nack — the
+The recorded file is handed to Briglia over the chat socket (`voice` request);
+Briglia transcribes it and the app deletes the file after the ack/nack — the
 recording never needs to outlive the exchange.
 
 Duration is capped in three layers, because the QML timer alone is not
@@ -34,8 +34,8 @@ import time
 # Env override is a test seam (selftests must never write into the real
 # cache); the app itself always uses the default.
 RECORD_DIR = os.environ.get(
-    "ADA_UT_VOICE_DIR",
-    os.path.expanduser("~/.cache/ada.permaevidence/voice"))
+    "BRIGLIA_UT_VOICE_DIR",
+    os.path.expanduser("~/.cache/briglia.permaevidence/voice"))
 # A phone voice note, not a podcast: the UI also shows elapsed time.
 # Module attribute (not a constant baked into closures) so tests can shrink
 # it to exercise the watchdog layers in seconds.
@@ -204,7 +204,7 @@ def elapsed_seconds():
 
 
 def delete_recording(path):
-    """Remove a finished note after Ada acked/nacked it. Only files inside
+    """Remove a finished note after Briglia acked/nacked it. Only files inside
     our own recording directory are deletable — this is not a general rm."""
     real = os.path.realpath(path or "")
     if not real.startswith(os.path.realpath(RECORD_DIR) + os.sep):

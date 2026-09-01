@@ -25,7 +25,7 @@ class TestKey:
 
     def __init__(self, channel):
         self.channel = channel
-        self.dir = tempfile.mkdtemp(prefix="ada-ut-testkey-")
+        self.dir = tempfile.mkdtemp(prefix="briglia-ut-testkey-")
         subprocess.run([os.path.join(RELEASE_SCRIPTS, "release-keygen.sh"),
                         channel, self.dir], check=True, capture_output=True,
                        env=dict(os.environ, PATH=_ORIG_PATH))
@@ -43,7 +43,7 @@ class TestKey:
     def sign(self, manifest_bytes, channel=None):
         """Envelope bytes for EXACT manifest bytes via sign-envelope.sh."""
         channel = channel or self.channel
-        work = tempfile.mkdtemp(prefix="ada-ut-sign-")
+        work = tempfile.mkdtemp(prefix="briglia-ut-sign-")
         try:
             manifest_path = os.path.join(work, "manifest.json")
             out_path = os.path.join(work, "manifest.sig.json")

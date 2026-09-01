@@ -4,7 +4,7 @@ shipped in the click. Purpose:
 1. The selftest round-trips it against py/qr_scan.py's decoder, including
    perspective-warped and degraded renders.
 2. It is the source of truth for the website generator's JS port
-   (ada-website app/qr/qrlib.ts); the selftest cross-checks the two
+   (briglia-website app/qr/qrlib.mjs); the selftest cross-checks the two
    matrix-for-matrix via node when available, so the tables cannot drift.
 
 Shares GF arithmetic and the EC-block/alignment tables with the decoder by

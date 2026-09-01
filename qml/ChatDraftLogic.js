@@ -18,7 +18,7 @@
 //
 //   hadPending reports whether ANY pending record survived the crash —
 //   an uncleared one restores through the composer copy (restoredCount
-//   stays 0), but the message may still have reached Ada, so the
+//   stays 0), but the message may still have reached Briglia, so the
 //   delivery-uncertainty warning must key off hadPending, not
 //   restoredCount (round 4, finding 3).
 

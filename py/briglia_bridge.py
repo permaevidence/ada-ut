@@ -1,20 +1,25 @@
-"""Python backend for the Ada Ubuntu Touch app (PyOtherSide bridge).
+"""Python backend for the Briglia Ubuntu Touch app (PyOtherSide bridge).
 
-All device-side work lives here: detecting/installing the Ada CLI binary and
-talking to its machine-readable setup surface (`ada setup-api`, ada-cli
-docs/UT_APP_PLAN.md §1). The QML layer renders state and calls these
-functions asynchronously; long operations report progress through
-pyotherside.send() events.
+All device-side work lives here: detecting/installing the Briglia CLI binary
+and talking to its machine-readable setup surface (`briglia setup-api`,
+briglia-cli docs/UT_APP_PLAN.md §1, schema 2). The QML layer renders state
+and calls these functions asynchronously; long operations report progress
+through pyotherside.send() events.
 
 Contract notes:
 - setup-api requests go as one JSON object on the child's stdin, NEVER on
   argv (argv is world-readable via /proc).
-- The install flow mirrors scripts/get-ada.sh in ada-cli: signed release
-  envelope (verified with the baked CLI key, anti-rollback — release_verify)
-  → authenticated platform tarball (size-bounded, hashed while streaming)
-  → ada + resources next to each other in ~/.local/bin → --version +
-  bundle-check smoke, then PATH wiring for login shells (UT's Terminal app
-  reads ~/.profile).
+- The install flow mirrors scripts/get-briglia.sh in briglia-cli: signed
+  release envelope (verified with the baked CLI key, anti-rollback —
+  release_verify) → authenticated platform tarball (size-bounded, hashed
+  while streaming) → briglia + resources next to each other in ~/.local/bin
+  → --version + bundle-check smoke, then PATH wiring for login shells (UT's
+  Terminal app reads ~/.profile).
+- A phone that still runs the CLI under its previous identity ("ada") is
+  detected READ-ONLY here (legacy_status) and migrated ONLY through the
+  CLI's own explicit engine — `briglia setup-api migrate`, the verb twin of
+  `briglia migrate` (rename plan §4.2/§5). Nothing in this module moves,
+  deletes or rewrites the old install itself.
 """
 
 import errno
@@ -46,9 +51,29 @@ except ImportError:  # unit-testing off-device
 # Releases channel, pinned key, pinned artifact location). Nothing here is
 # read from the environment on purpose — see release_verify's docstring.
 INSTALL_DIR = os.path.expanduser("~/.local/bin")
-ADA = os.path.join(INSTALL_DIR, "ada")
-BUNDLE_NAME = "ada-cli_ada.resources"  # SwiftPM resource artifact on Linux
-SETUP_API_SCHEMA = 1
+BRIGLIA = os.path.join(INSTALL_DIR, "briglia")
+BUNDLE_NAME = "briglia-cli_briglia.resources"  # SwiftPM resource artifact on Linux
+# EXACT match required (rename plan §4.1): schema 1 is the previous identity's
+# interface, anything newer is a CLI this app build does not understand.
+SETUP_API_SCHEMA = 2
+
+# The project website. One constant, referenced by every user-facing hint;
+# the final hostname is confirmed at cutover (rename plan §6/§8) and changes
+# here only.
+WEBSITE_BASE = "https://briglia.vercel.app"
+WEBSITE_APP_PAGE = WEBSITE_BASE + "/ubuntu-touch"
+WEBSITE_QR_PAGE = WEBSITE_BASE + "/qr"
+
+# ---- the previous identity ("ada"), for detection only. Every literal that
+# names the retired product lives in this block on purpose. The paths are
+# module attributes (not baked into closures) so the selftest can point them
+# at a fixture home; the app never overrides them.
+LEGACY_BINARY = os.path.join(INSTALL_DIR, "ada")
+LEGACY_CONFIG_ROOT = os.path.expanduser("~/.config/ada")
+LEGACY_DATA_ROOT = os.path.expanduser("~/.local/share/ada")
+LEGACY_USER_UNIT = os.path.expanduser("~/.config/systemd/user/ada.service")
+LEGACY_WAKELOCK_UNIT_NAME = "ada-keepawake.service"
+LEGACY_WAKELOCK_UNIT_PATH = "/etc/systemd/system/ada-keepawake.service"
 
 
 # ---------------------------------------------------------------- helpers
@@ -78,7 +103,7 @@ def _run(argv, stdin_text=None, timeout=120):
 
 
 def _fetch(url, timeout=60):
-    request = urllib.request.Request(url, headers={"User-Agent": "ada-ut-app"})
+    request = urllib.request.Request(url, headers={"User-Agent": "briglia-ut-app"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
 
@@ -89,37 +114,175 @@ def _progress(stage, percent, message):
 
 # ---------------------------------------------------------------- detect
 
+def legacy_status():
+    """Read-only look at a previous-identity ("ada") installation on this
+    device. Nothing here is authoritative for the migration decision once
+    Briglia is installed — `setup-api status`.migration is (the CLI owns
+    that gate) — but the app needs this BEFORE Briglia exists (to offer
+    "install Briglia, it migrates your data") and AFTER the migration (the
+    keep-awake system unit is root-owned; an unprivileged `migrate` records
+    it and leaves the swap to this app's sudo dialog, plan §5).
+
+    `binary` is true only for a REAL file: after a migration the same path
+    is the compatibility symlink to briglia (plan §4.6), reported as
+    `compat_symlink` instead."""
+    is_link = os.path.islink(LEGACY_BINARY)
+    binary = os.path.isfile(LEGACY_BINARY) and not is_link
+    config_root = os.path.isdir(LEGACY_CONFIG_ROOT)
+    data_root = os.path.isdir(LEGACY_DATA_ROOT)
+    roots = [path for present, path in ((config_root, LEGACY_CONFIG_ROOT),
+                                        (data_root, LEGACY_DATA_ROOT)) if present]
+    return {
+        "binary": binary,
+        "compat_symlink": is_link,
+        "config_root": config_root,
+        "data_root": data_root,
+        "roots": roots,
+        "user_unit": os.path.isfile(LEGACY_USER_UNIT),
+        "wakelock_unit": os.path.isfile(LEGACY_WAKELOCK_UNIT_PATH),
+        "wakelock_unit_name": LEGACY_WAKELOCK_UNIT_NAME,
+        # "An old install is here": data roots or the old binary. The units
+        # alone (leftover files) are not an install.
+        "present": binary or config_root or data_root,
+    }
+
+
 def detect():
     """What's on this device right now. Cheap enough to run on every page."""
     info = {
-        "ada_path": ADA,
+        "binary_path": BRIGLIA,
         "installed": False,
         "version": None,
         "status": None,
         "error": None,
+        "legacy": legacy_status(),
     }
-    if not os.access(ADA, os.X_OK):
+    if not os.access(BRIGLIA, os.X_OK):
         return info
-    code, out, err = _run([ADA, "--version"], timeout=30)
+    code, out, err = _run([BRIGLIA, "--version"], timeout=30)
     if code != 0:
-        info["error"] = "ada --version failed: %s" % (err or out).strip()[:300]
+        info["error"] = "briglia --version failed: %s" % (err or out).strip()[:300]
         return info
     info["installed"] = True
     info["version"] = out.strip()
-    # Chat capability signal: the daemon's app-chat socket (CLI >= 0.1.45).
-    # Version gating alone would hide chat from -dev builds that DO serve it,
-    # so the live socket wins over the version string. Same resolution rule
-    # as chat_client.socket_path() (env seam included) so the two can't drift.
+    # Chat capability signal: the daemon's app-chat socket (every Briglia
+    # release serves it; the check stays because a -dev build's version
+    # string is not comparable, and the live socket wins over the version
+    # string). Same resolution rule as chat_client.socket_path() (env seam
+    # included) so the two can't drift.
     info["release_verifier"] = release_verify.provider_status()
     info["chat_socket"] = os.path.exists(os.environ.get(
-        "ADA_CHAT_SOCKET",
-        os.path.expanduser("~/.local/share/ada/app-chat.sock")))
+        "BRIGLIA_CHAT_SOCKET",
+        os.path.expanduser("~/.local/share/briglia/app-chat.sock")))
     status = setup_api("status")
     if status.get("ok"):
         info["status"] = status
     else:
         info["error"] = _describe_api_error(status)
     return info
+
+
+# ---------------------------------------------------------------- identity migration
+#
+# Rename plan §4.2/§5: the ONLY thing that moves an old ("ada") installation
+# to Briglia is the CLI's own journaled engine. This app reaches it through
+# setup-api's `migrate` verb — same spec, same crash-safety, same refusals
+# as `briglia migrate` in a terminal — strictly behind the consent page
+# (MigratePage.qml). Diagnostics (`detect`, `setup-api status`) never
+# migrate; the CLI's status block (`migration.needed / conflict /
+# journal_state`) is the authority the page renders.
+
+def migrate(rollback=False):
+    """Run (or recover, or — before its commit point — roll back) the
+    identity migration. Returns setup-api's response verbatim: on success
+    {"ok": true, "outcome": "migrated"|"rolled_back"|"nothing_to_do",
+    "notes": [...], "log": [...], "migration": {...}}; on failure the
+    engine's typed error ("migration_refused" | "migration_journal_corrupt"
+    | "migration_failed") with its "log". The engine holds an exclusive
+    lock, so a second concurrent call refuses instead of racing."""
+    request = {"rollback": True} if rollback else {}
+    return setup_api("migrate", request)
+
+
+# The one property of a served root script that must hold before it may run
+# under sudo: with `set -e`, a failing middle step would otherwise exit with
+# the system partition left writable. Content check, not a version compare.
+ROOT_SCRIPT_TRAP_MARKER = "trap 'mount -o remount,ro /"
+
+
+def legacy_wakelock_uninstall_script():
+    """The removal script the PREVIOUS identity served for its keep-awake
+    unit (`… setup-api service keepawake_script:true` → wakelock_uninstall_
+    script), reproduced byte-for-byte in shape. After a migration the old
+    binary is retired (parked), so it cannot be asked — and the unit it
+    installed is root-owned, so an unprivileged `migrate` only records it
+    (plan §4.3.5) and leaves the swap to this app's sudo dialog."""
+    return (
+        "#!/bin/sh\n"
+        "# Legacy (ada) keep-awake unit removal (Ubuntu Touch). Run as root: sudo sh <this-file>\n"
+        "set -e\n"
+        "mount -o remount,rw /\n"
+        "trap 'mount -o remount,ro / || echo \"note: / stays read-write until reboot (busy)\"' EXIT INT TERM HUP\n"
+        "systemctl disable --now %s || true\n"
+        "rm -f %s\n"
+        "systemctl daemon-reload\n"
+        % (LEGACY_WAKELOCK_UNIT_NAME, LEGACY_WAKELOCK_UNIT_PATH))
+
+
+def legacy_wakelock_swap_script():
+    """Compose the ONE root script that swaps the keep-awake unit after a
+    migration: Briglia's unit is installed FIRST (the script the CLI itself
+    serves, trap-gated), the legacy unit is removed AFTER — the two overlap
+    on purpose so the phone cannot suspend in between (plan §4.3/§5). A
+    failure in the install half stops the script (`set -e`) with the legacy
+    unit still holding the wakelock; the swap is idempotent, so a retry is
+    safe. Returns {"ok", "script", "error"}; nothing runs here."""
+    if not os.path.isfile(LEGACY_WAKELOCK_UNIT_PATH):
+        return {"ok": False, "script": None,
+                "error": "no legacy keep-awake unit is installed — nothing to swap"}
+    served = setup_api("service", {"keepawake_script": True})
+    if not served.get("ok"):
+        return {"ok": False, "script": None, "error": _describe_api_error(served)}
+    install = served.get("wakelock_install_script") or ""
+    if not install.strip():
+        return {"ok": False, "script": None,
+                "error": "the CLI did not serve a keep-awake install script"}
+    if ROOT_SCRIPT_TRAP_MARKER not in install:
+        return {"ok": False, "script": None,
+                "error": "the served keep-awake script lacks the read-only restore "
+                         "trap — refusing to run it as root"}
+    if LEGACY_WAKELOCK_UNIT_NAME in install:
+        return {"ok": False, "script": None,
+                "error": "the served keep-awake script still names the legacy unit — "
+                         "refusing (is the installed CLI really Briglia?)"}
+    uninstall = legacy_wakelock_uninstall_script()
+    if ROOT_SCRIPT_TRAP_MARKER not in uninstall:  # defensive: same gate, same rule
+        return {"ok": False, "script": None, "error": "internal: legacy removal script lacks the trap"}
+    script = (install.rstrip("\n") + "\n\n"
+              "# --- Briglia's unit is up; now retire the legacy unit (deliberate overlap)\n"
+              + uninstall)
+    return {"ok": True, "script": script, "error": None}
+
+
+def swap_legacy_wakelock(passcode):
+    """Run the composed swap as root (passcode contract of run_privileged_
+    script: stdin only, never stored). The verdict is TRUTHFUL about what
+    landed: a script that exited 0 but left the legacy unit file behind is
+    reported as a failure, never as done."""
+    composed = legacy_wakelock_swap_script()
+    if not composed["ok"]:
+        passcode = None
+        return {"ok": False, "output": "", "error": composed["error"],
+                "legacy_unit_remaining": os.path.isfile(LEGACY_WAKELOCK_UNIT_PATH)}
+    result = run_privileged_script(composed["script"], passcode)
+    passcode = None
+    remaining = os.path.isfile(LEGACY_WAKELOCK_UNIT_PATH)
+    result["legacy_unit_remaining"] = remaining
+    if result.get("ok") and remaining:
+        result["ok"] = False
+        result["error"] = ("the swap script finished but the legacy unit file %s is still "
+                           "present — retry, or remove it by hand" % LEGACY_WAKELOCK_UNIT_PATH)
+    return result
 
 
 # ---------------------------------------------------------------- files
@@ -142,7 +305,7 @@ def list_dir(path):
             is_dir = os.path.isdir(full)
             # Only regular files are selectable attachments: a FIFO or
             # device node here would pass a naive exists+size check and
-            # could hang or exhaust the Ada daemon (it refuses them too —
+            # could hang or exhaust the Briglia daemon (it refuses them too —
             # this keeps the picker from offering guaranteed-nack rows).
             if not is_dir and not os.path.isfile(full):
                 continue
@@ -161,14 +324,20 @@ def list_dir(path):
 def setup_api(verb, request=None):
     """One setup-api round trip. Returns the decoded response object, or a
     synthesized {"ok": False, "error": {...}} when the call itself failed."""
-    argv = [ADA, "setup-api", verb]
+    argv = [BRIGLIA, "setup-api", verb]
     stdin_text = None
     if verb != "status":
         stdin_text = json.dumps(request or {})
     # Toolchain installs run apt over phone networks — minutes, not seconds.
     # LibreOffice's closure is a few hundred MB, so give it real headroom.
-    timeout = 5400 if (verb == "apply" and isinstance(request, dict)
-                       and "toolchain" in request) else 180
+    # The identity migration stops/starts services, moves the data roots
+    # and runs a 60 s health probe before retiring anything: minutes too.
+    if verb == "apply" and isinstance(request, dict) and "toolchain" in request:
+        timeout = 5400
+    elif verb == "migrate":
+        timeout = 900
+    else:
+        timeout = 180
     code, out, err = _run(argv, stdin_text=stdin_text, timeout=timeout)
     try:
         payload = json.loads(out) if out.strip() else None
@@ -182,9 +351,19 @@ def setup_api(verb, request=None):
     if payload.get("schema") != SETUP_API_SCHEMA:
         return {"ok": False, "error": {
             "code": "schema_mismatch",
-            "message": "setup-api schema %s (app speaks %s) — update the app"
-                       % (payload.get("schema"), SETUP_API_SCHEMA)}}
+            "message": _schema_mismatch_message(payload.get("schema"))}}
     return payload
+
+
+def _schema_mismatch_message(seen):
+    """Exact-schema gate wording: an OLDER schema means the installed CLI
+    predates this app (schema 1 = the previous identity's interface), a
+    NEWER one means the app is behind."""
+    if isinstance(seen, int) and seen < SETUP_API_SCHEMA:
+        return ("this CLI speaks setup-api schema %s; the app needs schema %s "
+                "(Briglia CLI 0.2.0 or newer) — update the CLI" % (seen, SETUP_API_SCHEMA))
+    return ("setup-api schema %s (app speaks %s) — update the app"
+            % (seen, SETUP_API_SCHEMA))
 
 
 def _describe_api_error(payload):
@@ -216,7 +395,7 @@ _rename = os.replace
 
 
 def _journal_path():
-    return os.path.join(INSTALL_DIR, ".ada-install-journal.json")
+    return os.path.join(INSTALL_DIR, ".briglia-install-journal.json")
 
 
 def _fsync_dir(path):
@@ -285,14 +464,14 @@ def _recover_interrupted_swap(bundle_dest):
             journal = {}
 
     components = (
-        (ADA, ADA + ".old", False, "had_binary"),
+        (BRIGLIA, BRIGLIA + ".old", False, "had_binary"),
         (bundle_dest, bundle_dest + ".old", True, "had_bundle"),
     )
 
     def cleanup_staging():
-        if os.path.isfile(ADA + ".new"):
+        if os.path.isfile(BRIGLIA + ".new"):
             try:
-                os.unlink(ADA + ".new")
+                os.unlink(BRIGLIA + ".new")
             except OSError:
                 pass
         shutil.rmtree(bundle_dest + ".new", ignore_errors=True)
@@ -371,32 +550,35 @@ def _extract_release(tarball, dest):
     return None
 
 
-def _validate_staged(staged_ada):
+def _validate_staged(staged_binary):
     """Run the STAGED binary before anything is touched: version, bundle,
     and — the compatibility gate — setup-api with our schema. Returns
     (version, None) or (None, failure message)."""
-    code, out, err = _run([staged_ada, "--version"], timeout=30)
+    code, out, err = _run([staged_binary, "--version"], timeout=30)
     if code != 0:
         return None, "downloaded binary failed --version: %s" % (err or out).strip()[:300]
     version = out.strip()
-    code, out, err = _run([staged_ada, "bundle-check"], timeout=30)
+    code, out, err = _run([staged_binary, "bundle-check"], timeout=30)
     if code != 0:
         return None, "downloaded bundle check failed: %s" % (err or out).strip()[:300]
-    code, out, err = _run([staged_ada, "setup-api", "status"], timeout=60)
+    code, out, err = _run([staged_binary, "setup-api", "status"], timeout=60)
     try:
         payload = json.loads(out) if out.strip() else None
     except ValueError:
         payload = None
-    if payload is None or payload.get("schema") != SETUP_API_SCHEMA:
-        return None, ("this Ada CLI release (%s) predates the app's setup interface — "
+    if payload is None:
+        return None, ("this Briglia CLI release (%s) predates the app's setup interface — "
                       "it was NOT installed. Try again after the next CLI release."
                       % version)
+    if payload.get("schema") != SETUP_API_SCHEMA:
+        return None, ("this Briglia CLI release (%s): %s — it was NOT installed."
+                      % (version, _schema_mismatch_message(payload.get("schema"))))
     return version, None
 
 
 def install():
-    """Download + verify + STAGE + validate + transactionally swap the Ada
-    CLI (mirrors ada-cli's own UpgradeService: nothing existing is touched
+    """Download + verify + STAGE + validate + transactionally swap the Briglia
+    CLI (mirrors briglia-cli's own UpgradeService: nothing existing is touched
     until the new release fully validated, the swap is same-volume renames,
     and any failure rolls both components back). Emits
     pyotherside.send('install', stage, percent, message); returns
@@ -427,10 +609,10 @@ def install():
         return fail("no build for %s in the signed release" % key)
     version = manifest["version"]
 
-    _progress("download", 5, "Downloading Ada CLI %s…" % version)
-    tmp_dir = tempfile.mkdtemp(prefix="ada-ut-install-")
+    _progress("download", 5, "Downloading Briglia CLI %s…" % version)
+    tmp_dir = tempfile.mkdtemp(prefix="briglia-ut-install-")
     try:
-        tarball = os.path.join(tmp_dir, "ada.tar.gz")
+        tarball = os.path.join(tmp_dir, "briglia.tar.gz")
 
         def on_progress(done, total):
             _progress("download", 5 + 70 * done // total,
@@ -448,14 +630,14 @@ def install():
         extract_failure = _extract_release(tarball, tmp_dir)
         if extract_failure:
             return fail(extract_failure)
-        staged_ada = os.path.join(tmp_dir, "ada")
+        staged_binary = os.path.join(tmp_dir, "briglia")
         staged_bundle = os.path.join(tmp_dir, BUNDLE_NAME)
-        if not os.path.isfile(staged_ada) or not os.path.isdir(staged_bundle):
-            return fail("unexpected tarball layout — expected ada + %s" % BUNDLE_NAME)
+        if not os.path.isfile(staged_binary) or not os.path.isdir(staged_bundle):
+            return fail("unexpected tarball layout — expected briglia + %s" % BUNDLE_NAME)
 
         _progress("check", 86, "Checking the downloaded release…")
-        os.chmod(staged_ada, 0o755)
-        staged_version, staged_failure = _validate_staged(staged_ada)
+        os.chmod(staged_binary, 0o755)
+        staged_version, staged_failure = _validate_staged(staged_binary)
         if staged_failure:
             return fail(staged_failure)
 
@@ -464,11 +646,11 @@ def install():
         _progress("installing", 92, "Installing to ~/.local/bin…")
         try:
             os.makedirs(INSTALL_DIR, exist_ok=True)
-            shutil.copy2(staged_ada, ADA + ".new")
-            os.chmod(ADA + ".new", 0o755)
+            shutil.copy2(staged_binary, BRIGLIA + ".new")
+            os.chmod(BRIGLIA + ".new", 0o755)
             shutil.copytree(staged_bundle, bundle_dest + ".new")
         except OSError as exc:
-            for leftover in (ADA + ".new",):
+            for leftover in (BRIGLIA + ".new",):
                 if os.path.isfile(leftover):
                     os.unlink(leftover)
             shutil.rmtree(bundle_dest + ".new", ignore_errors=True)
@@ -481,7 +663,7 @@ def install():
     # journal (fsynced before the first rename, deleted right after
     # validation) is what makes a CRASH at any point decidable — see
     # _recover_interrupted_swap.
-    had_binary = os.path.isfile(ADA)
+    had_binary = os.path.isfile(BRIGLIA)
     had_bundle = os.path.isdir(bundle_dest)
     # Power-loss protocol (Codex round 4): staged contents durable first,
     # then the journal written ATOMICALLY (tmp + fsync + rename) with its
@@ -500,7 +682,7 @@ def install():
         if sync_failure := _fsync_dir(INSTALL_DIR):
             raise OSError("journal directory sync failed: %s" % sync_failure)
     except OSError as exc:
-        for leftover in (ADA + ".new", journal_tmp):
+        for leftover in (BRIGLIA + ".new", journal_tmp):
             if os.path.isfile(leftover):
                 os.unlink(leftover)
         shutil.rmtree(bundle_dest + ".new", ignore_errors=True)
@@ -508,17 +690,17 @@ def install():
     undo = []  # (src, dst) renames that restore the previous state
     try:
         if had_binary:
-            _rename(ADA, ADA + ".old")
-            undo.append((ADA + ".old", ADA))
-        _rename(ADA + ".new", ADA)
-        undo.append((ADA, ADA + ".new"))
+            _rename(BRIGLIA, BRIGLIA + ".old")
+            undo.append((BRIGLIA + ".old", BRIGLIA))
+        _rename(BRIGLIA + ".new", BRIGLIA)
+        undo.append((BRIGLIA, BRIGLIA + ".new"))
         if had_bundle:
             _rename(bundle_dest, bundle_dest + ".old")
             undo.append((bundle_dest + ".old", bundle_dest))
         _rename(bundle_dest + ".new", bundle_dest)
         undo.append((bundle_dest, bundle_dest + ".new"))
         # Post-swap sanity on the LIVE paths (bundle-next-to-binary).
-        code, out, err = _run([ADA, "bundle-check"], timeout=30)
+        code, out, err = _run([BRIGLIA, "bundle-check"], timeout=30)
         if code != 0:
             raise OSError("installed bundle check failed: %s" % (err or out).strip()[:300])
         # Barrier: the swap renames must be durable BEFORE the commit
@@ -534,14 +716,14 @@ def install():
         # Rollback is complete when every pre-existing component is back on
         # its live path, nothing new remained live, and nothing is parked.
         incomplete = (
-            (had_binary and not os.path.isfile(ADA))
-            or (not had_binary and os.path.isfile(ADA))
+            (had_binary and not os.path.isfile(BRIGLIA))
+            or (not had_binary and os.path.isfile(BRIGLIA))
             or (had_bundle and not os.path.isdir(bundle_dest))
             or (not had_bundle and os.path.isdir(bundle_dest))
-            or os.path.isfile(ADA + ".old")
+            or os.path.isfile(BRIGLIA + ".old")
             or os.path.isdir(bundle_dest + ".old"))
-        if os.path.isfile(ADA + ".new"):
-            os.unlink(ADA + ".new")
+        if os.path.isfile(BRIGLIA + ".new"):
+            os.unlink(BRIGLIA + ".new")
         shutil.rmtree(bundle_dest + ".new", ignore_errors=True)
         # Same two-barrier shape as recovery: the journal survives unless
         # the rollback is BOTH structurally complete and durable, so the
@@ -583,8 +765,8 @@ def install():
             "may revert to the previous version; run install again to finish" % sync_failure)
     # Commit durable: the backups are garbage now. A power cut during this
     # cleanup is safe — journal-absent recovery discards any survivor.
-    if os.path.isfile(ADA + ".old"):
-        os.unlink(ADA + ".old")
+    if os.path.isfile(BRIGLIA + ".old"):
+        os.unlink(BRIGLIA + ".old")
     shutil.rmtree(bundle_dest + ".old", ignore_errors=True)
     _fsync_dir(INSTALL_DIR)  # ordering aid only
 
@@ -598,7 +780,7 @@ def install():
         release_verify.record_accepted(release_verify.CLI_POLICY, manifest)
     except OSError as exc:
         trust_note = "could not record the anti-rollback floor: %s" % exc
-    _progress("done", 100, "Ada CLI %s installed" % staged_version)
+    _progress("done", 100, "Briglia CLI %s installed" % staged_version)
     return {"ok": True, "version": staged_version, "error": None,
             "sequence": manifest["sequence"], "trust_note": trust_note}
 
@@ -639,10 +821,10 @@ def run_sudo_command(command_text, passcode):
 def run_privileged_script(script_text, passcode):
     """Run a multi-line root script (the wakelock install/uninstall scripts
     served by `setup-api service keepawake_script:true`). The script body is
-    ada-cli's own — this function only transports it to root."""
+    briglia-cli's own — this function only transports it to root."""
     if not (script_text or "").strip():
         return {"ok": False, "output": "", "error": "empty privileged script"}
-    script_dir = tempfile.mkdtemp(prefix="ada-ut-priv-")
+    script_dir = tempfile.mkdtemp(prefix="briglia-ut-priv-")
     script_path = os.path.join(script_dir, "script.sh")
     try:
         fd = os.open(script_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -676,13 +858,13 @@ _SERVICE_ACTIONS = ("start", "stop")
 
 
 def systemctl_user(action):
-    """Start/stop the installed ada.service. Restart and install/uninstall go
+    """Start/stop the installed briglia.service. Restart and install/uninstall go
     through `setup-api service` (which also returns the fresh status block);
     this covers the two verbs that API deliberately doesn't own."""
     if action not in _SERVICE_ACTIONS:
         return {"ok": False, "output": "",
                 "error": "unsupported action %r (start|stop only)" % (action,)}
-    code, out, err = _run(["systemctl", "--user", action, "ada.service"],
+    code, out, err = _run(["systemctl", "--user", action, "briglia.service"],
                           timeout=60)
     if code == 0:
         return {"ok": True, "output": (out or "").strip(), "error": None}
@@ -691,12 +873,12 @@ def systemctl_user(action):
 
 
 def tail_journal(lines=40):
-    """Last N journal lines of ada.service, for the dashboard log card."""
+    """Last N journal lines of briglia.service, for the dashboard log card."""
     try:
         count = max(1, min(int(lines), 500))
     except (TypeError, ValueError):
         count = 40
-    code, out, err = _run(["journalctl", "--user", "-u", "ada.service",
+    code, out, err = _run(["journalctl", "--user", "-u", "briglia.service",
                            "-n", str(count), "--no-pager", "-o", "short-iso"],
                           timeout=30)
     if code == 0:
@@ -706,7 +888,7 @@ def tail_journal(lines=40):
 
 
 def _wire_login_shell_path():
-    """Same PATH wiring as get-ada.sh: UT's Terminal app runs bash as a LOGIN
+    """Same PATH wiring as get-briglia.sh: UT's Terminal app runs bash as a LOGIN
     shell, so ~/.profile matters alongside ~/.bashrc. Best-effort."""
     line = 'export PATH="$HOME/.local/bin:$PATH"'
     for rc in ("~/.bashrc", "~/.profile"):
@@ -723,7 +905,7 @@ def _wire_login_shell_path():
 
 # ---------------------------------------------------------- app self-update
 # The click itself, not the CLI: scripts/publish_click.sh publishes each
-# release as an immutable GitHub Release of permaevidence/ada-ut (click +
+# release as an immutable GitHub Release of permaevidence/briglia-ut (click +
 # signed envelope, release_verify.APP_POLICY), and this unconfined app may
 # install its own new package. The running instance keeps executing OLD
 # code after a successful install — callers must tell the user to close and
@@ -736,12 +918,12 @@ MAX_CLICK_BYTES = 20 * 2**20
 
 def _app_settings_path():
     return os.environ.get(
-        "ADA_UT_APP_SETTINGS_PATH",
-        os.path.expanduser("~/.cache/ada.permaevidence/app-settings.json"))
+        "BRIGLIA_UT_APP_SETTINGS_PATH",
+        os.path.expanduser("~/.cache/briglia.permaevidence/app-settings.json"))
 
 
 def app_settings():
-    """App-local preferences (NOT Ada's config). Missing/corrupt file ==
+    """App-local preferences (NOT Briglia's config). Missing/corrupt file ==
     defaults; auto_update defaults OFF — updating is opt-in."""
     try:
         with open(_app_settings_path()) as f:
@@ -774,7 +956,7 @@ def app_own_version():
     """The running app's version, from the manifest.json the click ships in
     its data area (build_click.py packages it next to py/ and qml/)."""
     manifest_path = os.environ.get(
-        "ADA_UT_APP_MANIFEST",
+        "BRIGLIA_UT_APP_MANIFEST",
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "..", "manifest.json"))
     try:
@@ -863,7 +1045,7 @@ DBUS_TOOL_CANDIDATES = (("busctl", ("/usr/bin/busctl", "/bin/busctl")),
 
 
 def _dbus_tool():
-    override = os.environ.get("ADA_UT_CLICK_DBUS_TOOL")
+    override = os.environ.get("BRIGLIA_UT_CLICK_DBUS_TOOL")
     if override == "none":
         return None
     if override:
@@ -921,7 +1103,7 @@ def _install_click(click_path):
         "could not install the update automatically — "
         + "; ".join(attempts)
         + ". Manual path that works on every device: open "
-          "ada-app-psi.vercel.app/app in Morph, download the new version, "
+          + WEBSITE_APP_PAGE + " in Morph, download the new version, "
           "open the file and confirm the OpenStore prompt.")
 
 
@@ -929,8 +1111,8 @@ def _registry_version():
     """Version in the system click registry's `current` manifest — the
     ground truth for what is actually installed. None when unreadable
     (developer machines, tests)."""
-    base = os.environ.get("ADA_UT_CLICK_REGISTRY") \
-        or "/opt/click.ubuntu.com/ada.permaevidence"
+    base = os.environ.get("BRIGLIA_UT_CLICK_REGISTRY") \
+        or "/opt/click.ubuntu.com/briglia.permaevidence"
     try:
         with open(os.path.join(base, "current", "manifest.json")) as f:
             return json.load(f).get("version")
@@ -942,7 +1124,7 @@ def _verify_registry(target):
     """Post-install truth check: an installer that RETURNED success must
     also have moved the registry to the target version. Unreadable
     registry → accept the installer's word (non-UT environments)."""
-    wait = float(os.environ.get("ADA_UT_CLICK_REGISTRY_WAIT", "15"))
+    wait = float(os.environ.get("BRIGLIA_UT_CLICK_REGISTRY_WAIT", "15"))
     deadline = time.time() + wait
     while True:
         seen = _registry_version()

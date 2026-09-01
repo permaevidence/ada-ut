@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=Ada
-Comment=Installer & control panel for Ada CLI
+Name=Briglia
+Comment=Installer & control panel for Briglia CLI
 Exec=qmlscene %u qml/Main.qml
 Icon=assets/logo.png
 Terminal=false

@@ -4,7 +4,7 @@ import Lomiri.Components 1.3
 
 /*
  * Shown after a successful apply while the daemon was running
- * (setup-api's restart_needed): changes reach `ada daemon` only after a
+ * (setup-api's restart_needed): changes reach `briglia daemon` only after a
  * restart. The button uses `setup-api service restart`, which exists only
  * where the service does (Linux) — elsewhere the page just shows the hint.
  */
@@ -27,7 +27,7 @@ ColumnLayout {
         color: theme.palette.normal.backgroundSecondaryText
         text: hint.message !== ""
               ? hint.message
-              : i18n.tr("Ada is running — restart it so the change takes effect.")
+              : i18n.tr("Briglia is running — restart it so the change takes effect.")
     }
 
     Button {
@@ -37,13 +37,13 @@ ColumnLayout {
                  && hint.app.api.service.supported === true
                  && hint.app.api.service.unit_installed === true
         enabled: !hint.restarting
-        text: hint.restarting ? i18n.tr("Restarting…") : i18n.tr("Restart Ada now")
+        text: hint.restarting ? i18n.tr("Restarting…") : i18n.tr("Restart Briglia now")
         onClicked: {
             hint.restarting = true;
             hint.app.apiService({action: "restart"}, function(result) {
                 hint.restarting = false;
                 if (result && result.ok) {
-                    hint.message = i18n.tr("Ada restarted — the change is live.");
+                    hint.message = i18n.tr("Briglia restarted — the change is live.");
                     hint.lastResult = null;
                     hint.app.refresh();
                 } else {

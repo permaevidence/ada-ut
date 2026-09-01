@@ -25,8 +25,8 @@ import qr_ref
 import qr_scan
 
 JS_LIB = os.environ.get(
-    "ADA_QRLIB_JS",
-    os.path.expanduser("~/Desktop/ada-website/app/qr/qrlib.mjs"))
+    "BRIGLIA_QRLIB_JS",
+    os.path.expanduser("~/Desktop/briglia-website/app/qr/qrlib.mjs"))
 
 CHECKS = [0, 0]  # passed, failed
 
@@ -254,7 +254,7 @@ def test_scan_png_modes(tmp):
 def test_frame_paths(tmp):
     import time
     frame_dir = os.path.join(tmp, "frames")
-    os.environ["ADA_QR_FRAME_DIR"] = frame_dir
+    os.environ["BRIGLIA_QR_FRAME_DIR"] = frame_dir
     try:
         p1 = qr_scan.frame_path(1)
         p2 = qr_scan.frame_path(2)
@@ -310,7 +310,7 @@ def test_frame_paths(tmp):
               qr_scan.remove_file(inside_other) is False
               and os.path.exists(inside_other))
     finally:
-        del os.environ["ADA_QR_FRAME_DIR"]
+        del os.environ["BRIGLIA_QR_FRAME_DIR"]
 
 
 def test_blank_frames(tmp):
@@ -429,8 +429,8 @@ def test_debug_diagnostics(tmp):
     finish_photo keeps the same cache-dir/qr-* discipline as remove_file."""
     debug_dir = os.path.join(tmp, "qr-debug")
     frame_dir = os.path.join(tmp, "frames2")
-    os.environ["ADA_QR_DEBUG_DIR"] = debug_dir
-    os.environ["ADA_QR_FRAME_DIR"] = frame_dir
+    os.environ["BRIGLIA_QR_DEBUG_DIR"] = debug_dir
+    os.environ["BRIGLIA_QR_FRAME_DIR"] = frame_dir
     try:
         path = os.path.join(tmp, "dbg.png")
 
@@ -530,8 +530,8 @@ def test_debug_diagnostics(tmp):
               qr_scan.finish_photo(outside, True) is False
               and os.path.exists(outside))
     finally:
-        del os.environ["ADA_QR_DEBUG_DIR"]
-        del os.environ["ADA_QR_FRAME_DIR"]
+        del os.environ["BRIGLIA_QR_DEBUG_DIR"]
+        del os.environ["BRIGLIA_QR_FRAME_DIR"]
 
 
 def test_scanned_key_logic(tmp):
@@ -637,7 +637,7 @@ def test_js_port(tmp):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="ada-qr-selftest-")
+    tmp = tempfile.mkdtemp(prefix="briglia-qr-selftest-")
     try:
         test_tables()
         test_clean_roundtrip(tmp)

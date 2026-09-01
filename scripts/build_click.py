@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the ada-ut .click package — no Clickable, no Docker, no dpkg.
+"""Build the briglia-ut .click package — no Clickable, no Docker, no dpkg.
 
 The app is pure QML + Python (architecture "all": nothing to compile), and a
 .click is just a Debian-format ar archive (debian-binary + control.tar.gz +
@@ -8,7 +8,7 @@ it deterministically with the Python standard library, so the same command
 works on the Mac and in CI.
 
 Usage:  python3 scripts/build_click.py [output-dir]
-Output: <output-dir or build/>/ada.permaevidence_<version>_all.click
+Output: <output-dir or build/>/briglia.permaevidence_<version>_all.click
 """
 
 import gzip

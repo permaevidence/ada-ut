@@ -8,7 +8,7 @@ import "../ScannedKeyLogic.js" as ScanLogic
  * live (shows the bot's username), chat id must be numeric — the same
  * validation the wizard and setup-api enforce. Optional in the wizard, but
  * required before the background service can be enabled (the service runs
- * `ada daemon`, whose channel is Telegram).
+ * `briglia daemon`, whose channel is Telegram).
  */
 Page {
     id: page
@@ -86,7 +86,7 @@ Page {
                     return;
                 }
                 page.resultText = probe.bot_username
-                    ? i18n.tr("Saved — Ada will talk to you through @%1.").arg(probe.bot_username)
+                    ? i18n.tr("Saved — Briglia will talk to you through @%1.").arg(probe.bot_username)
                     : i18n.tr("Saved.");
                 tokenField.text = "";
                 page.app.consumeScannedKeys(["telegram_token", "telegram_chat_id"]);
@@ -129,7 +129,7 @@ Page {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("Telegram is how you talk to Ada from anywhere. Create a bot with @BotFather (one message, free), paste its token here, and get your numeric chat ID from @userinfobot.")
+                text: i18n.tr("Telegram is how you talk to Briglia from anywhere. Create a bot with @BotFather (one message, free), paste its token here, and get your numeric chat ID from @userinfobot.")
             }
 
             Label {

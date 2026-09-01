@@ -125,7 +125,7 @@ Item {
                 wrapMode: Text.WordWrap
                 textSize: Label.Small
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("Generate QR codes from your keys at ada-app-psi.vercel.app/qr on a computer, then scan them here. Scanned keys pre-fill the sections above — each still verifies before saving.")
+                text: i18n.tr("Generate QR codes from your keys at %1/qr on a computer, then scan them here. Scanned keys pre-fill the sections above — each still verifies before saving.").arg(page.app.websiteBase.replace("https://", ""))
             }
             Button {
                 Layout.fillWidth: true
@@ -166,8 +166,8 @@ Item {
                 color: theme.palette.normal.backgroundSecondaryText
                 text: {
                     var ws = page.api && page.api.web_search ? page.api.web_search : null;
-                    if (!ws) return i18n.tr("Which service answers Ada's web research.");
-                    return i18n.tr("Which service answers Ada's web research. Current: %1%2")
+                    if (!ws) return i18n.tr("Which service answers Briglia's web research.");
+                    return i18n.tr("Which service answers Briglia's web research. Current: %1%2")
                         .arg(ws.active)
                         .arg(ws.explicit === true ? "" : i18n.tr(" (automatic)"));
                 }
@@ -228,7 +228,7 @@ Item {
                 color: theme.palette.normal.backgroundSecondaryText
                 text: {
                     if (!page.api || !page.api.toolchain || !page.api.toolchain.tools)
-                        return i18n.tr("State unknown — is Ada CLI installed?");
+                        return i18n.tr("State unknown — is Briglia CLI installed?");
                     var missing = [];
                     var prefix = 0;
                     var pandocIn = false, loIn = false;
@@ -352,7 +352,7 @@ Item {
                 text: page.toolchainResult
             }
 
-            // ---- app updates (the click itself; the Ada CLI updates from
+            // ---- app updates (the click itself; the Briglia CLI updates from
             // the Dashboard's Update button)
             Label {
                 Layout.topMargin: units.gu(2)
@@ -364,7 +364,7 @@ Item {
                 wrapMode: Text.WordWrap
                 textSize: Label.Small
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("This app is v%1. Updates come from the Ada website; Ada itself updates from the Dashboard instead. After an app update, close and reopen the app.")
+                text: i18n.tr("This app is v%1. Updates are signed releases of the app's GitHub repository; Briglia itself updates from the Dashboard instead. After an app update, close and reopen the app.")
                     .arg(page.app.appVersion !== "" ? page.app.appVersion : "?")
             }
             RowLayout {
@@ -479,7 +479,7 @@ Item {
                         page.availableUpdate = "";
                         if (result.updated === true) {
                             page.updateResult = i18n.tr(
-                                "Updated to v%1 — close and reopen the app to start using it (Ada itself keeps running).")
+                                "Updated to v%1 — close and reopen the app to start using it (Briglia itself keeps running).")
                                 .arg(result.available);
                         } else {
                             page.updateResult = i18n.tr(

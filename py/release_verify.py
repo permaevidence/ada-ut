@@ -1,6 +1,6 @@
-"""Signed-release verification for the Ada Ubuntu Touch app.
+"""Signed-release verification for the Briglia Ubuntu Touch app.
 
-Both things this app downloads and installs — the Ada CLI, and new versions
+Both things this app downloads and installs — the Briglia CLI, and new versions
 of itself — are authenticated here before a single artifact byte is trusted:
 
   1. fetch the channel's signed envelope (bounded size) from its pinned
@@ -8,7 +8,7 @@ of itself — are authenticated here before a single artifact byte is trusted:
   2. verify the Ed25519 signature over the domain-separated input
      ("ada-release-envelope-v1\\0" + channel + "\\0" + keyId + "\\0" + exact
      payload bytes) with the key baked into this file;
-  3. validate the authenticated manifest exactly like the Ada CLI's own
+  3. validate the authenticated manifest exactly like the Briglia CLI's own
      verifier (schema, channel, SemVer, expiry, not-before, per-version
      asset URL prefix, plain asset names, sha256, size bounds);
   4. refuse rollback: the sequence must be at least the embedded minimum for
@@ -40,12 +40,16 @@ import subprocess
 import tempfile
 import urllib.request
 
+# Historical format name of the signed envelope (rename plan §3): the byte
+# layout, channel and keyId domain-separation did not change with the
+# product rename, so the name stays — renaming it would fork every signer
+# and verifier for no security gain.
 FORMAT = "ada-release-envelope-v1"
 MAX_ENVELOPE_BYTES = 128 * 1024
 MAX_PAYLOAD_BYTES = 64 * 1024
 CLOCK_SKEW_ALLOWANCE = 24 * 3600          # `published` may be this far ahead
 MAX_ARTIFACT_BYTES = 2 * 1024 ** 3
-USER_AGENT = "ada-ut-app"
+USER_AGENT = "briglia-ut-app"
 
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -89,41 +93,47 @@ class ReleasePolicy:
         return "%s|%s" % (self.channel, self.artifact_url_prefix)
 
 
-# STAMP-CLI-KEY-BEGIN — the Ada CLI release key (ada-cli .github/release-keys)
+# STAMP-CLI-KEY-BEGIN — the Briglia CLI release key (briglia-cli .github/release-keys;
+# same Ed25519 key as before the rename, keyId re-derived under the new channel)
 CLI_KEYS = {
-    "ada-cli-release-v1-94d967bae0867c2e":
+    "briglia-cli-release-v1-94d967bae0867c2e":
         "621031636aa2bb2edb64a58f2f72de7bc3559b08d717c79b4251f8b1e35b8a95",
 }
 # STAMP-CLI-KEY-END
 # STAMP-APP-KEY-BEGIN — this app's own release key (.release-keys/)
 APP_KEYS = {
-    "ada-ut-release-v1-7bb0163ac16c5cb3":
+    "briglia-ut-release-v1-7bb0163ac16c5cb3":
         "cdfa5dba857ad9276f2630c0c7028b53ea9933cc969e69f0a1cff4727ff0b7dc",
 }
 # STAMP-APP-KEY-END
 
-# Lowest CLI release this app build knows how to manage (setup-api schema,
-# app-chat socket): a fresh app must never install an older signed CLI.
-MIN_CLI_SEQUENCE = 58
-# Lowest app release this build accepts as an update target.
-MIN_APP_SEQUENCE = 1
+# Lowest CLI release this app build knows how to manage (setup-api schema 2,
+# the `migrate` verb, app-chat socket): a fresh app must never install an
+# older signed CLI. Sequences CONTINUE across the rename (plan §3): the
+# first Briglia CLI release is v0.2.0 = sequence 60, right after the last
+# release of the previous identity (59), so the floor also refuses every
+# pre-rename envelope by number, not only by channel name.
+MIN_CLI_SEQUENCE = 60
+# Lowest app release this build accepts as an update target (the first
+# Briglia click is sequence 2; sequence 1 was the previous identity).
+MIN_APP_SEQUENCE = 2
 # THIS build's own release sequence. publish_click.sh signs exactly this
 # value into the app envelope and refuses to publish anything else; a
 # device records it as its floor once the update lands.
-APP_RELEASE_SEQUENCE = 1
+APP_RELEASE_SEQUENCE = 2
 
 CLI_POLICY = ReleasePolicy(
-    "ada-cli", CLI_KEYS,
-    "https://github.com/permaevidence/ada-cli/releases/latest/download/manifest.sig.json",
-    "https://github.com/permaevidence/ada-cli/releases/download/v{version}/",
+    "briglia-cli", CLI_KEYS,
+    "https://github.com/permaevidence/briglia-cli/releases/latest/download/manifest.sig.json",
+    "https://github.com/permaevidence/briglia-cli/releases/download/v{version}/",
     MIN_CLI_SEQUENCE)
 APP_POLICY = ReleasePolicy(
-    "ada-ut", APP_KEYS,
-    "https://github.com/permaevidence/ada-ut/releases/latest/download/manifest.sig.json",
-    "https://github.com/permaevidence/ada-ut/releases/download/v{version}/",
+    "briglia-ut", APP_KEYS,
+    "https://github.com/permaevidence/briglia-ut/releases/latest/download/manifest.sig.json",
+    "https://github.com/permaevidence/briglia-ut/releases/download/v{version}/",
     MIN_APP_SEQUENCE)
 
-TRUST_FILE = os.path.expanduser("~/.config/ada-ut/release_trust.json")
+TRUST_FILE = os.path.expanduser("~/.config/briglia-ut/release_trust.json")
 
 
 # ------------------------------------------------- Ed25519, pure Python
@@ -253,7 +263,7 @@ def ed25519_verify_openssl(openssl, public_key, signature, message):
     Any failure (missing tool, bad exit, odd output) is simply 'not valid'."""
     if len(public_key) != 32 or len(signature) != 64:
         return False
-    work = tempfile.mkdtemp(prefix="ada-ut-verify-")
+    work = tempfile.mkdtemp(prefix="briglia-ut-verify-")
     try:
         pub = os.path.join(work, "pub.der")
         sig = os.path.join(work, "sig.bin")
@@ -490,7 +500,7 @@ def verify_envelope(raw, policy, now=None):
 
 # --------------------------------------------------------- trust store
 # {"schema": 2, "domains": {"<channel>|<artifact prefix>": <sequence>}} —
-# the same shape as the Ada CLI's ~/.local/share/ada/release_trust.json,
+# the same shape as the Briglia CLI's ~/.local/share/briglia/release_trust.json,
 # kept in this app's own file. Every access is under flock(2) on a sibling
 # lock file; a store keeps max(stored, new) so concurrent checks never
 # regress the floor. Unrecognized/corrupt content is reported and treated

@@ -231,7 +231,7 @@ class FakeGitHub:
 
 
 def main():
-    root = tempfile.mkdtemp(prefix="ada-ut-publish-selftest-")
+    root = tempfile.mkdtemp(prefix="briglia-ut-publish-selftest-")
     repo_src = os.path.dirname(HERE)
     repo = os.path.join(root, "repo")
     os.makedirs(repo)
@@ -242,10 +242,10 @@ def main():
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         elif os.path.exists(src):
             shutil.copy2(src, os.path.join(repo, item))
-    key = TestKey("ada-ut")
-    other = TestKey("ada-ut")
+    key = TestKey("briglia-ut")
+    other = TestKey("briglia-ut")
     os.makedirs(os.path.join(repo, ".release-keys"))
-    shutil.copy2(key.pub, os.path.join(repo, ".release-keys", "ada-ut-release.pub.pem"))
+    shutil.copy2(key.pub, os.path.join(repo, ".release-keys", "briglia-ut-release.pub.pem"))
     rv_path = os.path.join(repo, "py", "release_verify.py")
 
     def stamp(sequence, version, key_id=key.key_id, pub_hex=key.pub_hex, push=True):
@@ -275,7 +275,7 @@ def main():
     gh = FakeGitHub()
     log = os.path.join(root, "publications.jsonl")
     base_env = {
-        "REPO_ROOT": repo, "REPO": "test/ada-ut", "GH_TOKEN": "t0k",
+        "REPO_ROOT": repo, "REPO": "test/briglia-ut", "GH_TOKEN": "t0k",
         "GH_API_URL": gh.base + "/api", "GH_UPLOADS_URL": gh.base + "/api",
         "PUBLIC_DOWNLOAD_BASE": gh.base + "/download",
         "LIVE_ENVELOPE_URL": gh.base + "/latest/manifest.sig.json",
@@ -298,7 +298,7 @@ def main():
         return open(log).read().splitlines() if os.path.exists(log) else []
 
     def verify_public(seq, version):
-        policy = rv.ReleasePolicy("ada-ut", key.keys(), gh.base + "/latest/manifest.sig.json",
+        policy = rv.ReleasePolicy("briglia-ut", key.keys(), gh.base + "/latest/manifest.sig.json",
                                   gh.base + "/download/v{version}/", 1)
         rv.TRUST_FILE = os.path.join(root, "trust.json")
         try:
@@ -336,13 +336,13 @@ def main():
         rel = gh.by_tag("v0.7.4")
         check("--bootstrap publishes v0.7.4", rc == 0 and rel is not None and rel["draft"] is False, out)
         check("assets uploaded in order, envelope last",
-              rel and rel["order"] == ["ada.permaevidence_0.7.4_all.click", "manifest.json", "manifest.sig.json"],
+              rel and rel["order"] == ["briglia.permaevidence_0.7.4_all.click", "manifest.json", "manifest.sig.json"],
               rel and rel["order"])
         ok, m = verify_public(1, "0.7.4")
         check("public envelope verifies with the app's verifier (seq 1, v0.7.4)", ok, str(m)[:200])
-        click_built = open(os.path.join(repo, "build", "ada.permaevidence_0.7.4_all.click"), "rb").read()
+        click_built = open(os.path.join(repo, "build", "briglia.permaevidence_0.7.4_all.click"), "rb").read()
         check("published click == built click, and matches the signed sha256",
-              rel["assets"]["ada.permaevidence_0.7.4_all.click"] == click_built
+              rel["assets"]["briglia.permaevidence_0.7.4_all.click"] == click_built
               and m["platforms"]["click"]["sha256"] == hashlib.sha256(click_built).hexdigest())
         check("publication recorded after verification",
               len(log_lines()) == 1 and json.loads(log_lines()[0])["sequence"] == 1)
@@ -366,7 +366,7 @@ def main():
         ok, m = verify_public(2, "0.7.5")
         check("latest is now v0.7.5 seq 2", ok)
         rv.TRUST_FILE = os.path.join(root, "trust.json")
-        rv.record_accepted(rv.ReleasePolicy("ada-ut", key.keys(), "", gh.base + "/download/v{version}/", 1), m)
+        rv.record_accepted(rv.ReleasePolicy("briglia-ut", key.keys(), "", gh.base + "/download/v{version}/", 1), m)
         gh.faults["latest_override"] = gh.by_tag("v0.7.4")["assets"]["manifest.sig.json"]
         ok, replayed = verify_public(1, "0.7.4")
         check("rollback via a replayed older envelope refused",
@@ -390,7 +390,7 @@ def main():
         live_now = gh.latest()["assets"]["manifest.sig.json"]
         # Race: the channel advances to sequence 9 between our first check
         # (sees 2) and the pre-publish re-check (sees 9) → we must stop.
-        raced = key.sign(json.dumps({"channel": "ada-ut", "expires": "2099-01-01T00:00:00Z",
+        raced = key.sign(json.dumps({"channel": "briglia-ut", "expires": "2099-01-01T00:00:00Z",
                                      "platforms": {"click": {"sha256": "ab" * 32, "size": 1,
                                                              "url": gh.base + "/download/v0.9.0/x.click"}},
                                      "published": "2026-01-01T00:00:00Z", "schema": 1,
@@ -410,7 +410,7 @@ def main():
         gh.next_id += 1
         rc, out = run()
         check("stale draft for the tag is deleted, then v0.7.6 publishes",
-              rc == 0 and stale_id not in gh.releases and ("DELETE", "/api/repos/test/ada-ut/releases/%d" % stale_id) in gh.hits
+              rc == 0 and stale_id not in gh.releases and ("DELETE", "/api/repos/test/briglia-ut/releases/%d" % stale_id) in gh.hits
               and gh.by_tag("v0.7.6") and not gh.by_tag("v0.7.6")["draft"], out)
         stamp(4, "0.7.7")
         gh.faults["upload_fail"] = "manifest.sig.json"
@@ -451,7 +451,7 @@ def main():
         rc, out = run("--bootstrap")
         check("…even with --bootstrap", rc != 0 and "hard stop" in out and not gh.by_tag("v0.7.10"), out)
         del gh.faults["latest_override"]
-        gh.faults["download_substitute"] = {"ada.permaevidence_0.7.10_all.click": b"not the click"}
+        gh.faults["download_substitute"] = {"briglia.permaevidence_0.7.10_all.click": b"not the click"}
         before = len(log_lines())
         rc, out = run()
         check("public click differs from the built one → exit 1, NOT recorded",
@@ -525,7 +525,7 @@ def main():
               and gh.by_tag("v0.7.19") and not gh.by_tag("v0.7.19")["draft"], out)
         del gh.faults["ref_flip_after"]
         inner = os.path.join(repo_src, "scripts", "release", "publish-github-release.sh")
-        inner_env = {"GH_TOKEN": "t0k", "REPO": "test/ada-ut", "REF_NAME": "v9.9.9", "VERSION": "9.9.9",
+        inner_env = {"GH_TOKEN": "t0k", "REPO": "test/briglia-ut", "REF_NAME": "v9.9.9", "VERSION": "9.9.9",
                      "TITLE": "t", "ASSETS": os.path.join(repo, "manifest.json"), "GH_API_URL": gh.base + "/api"}
         posts_before = len(posts())
         p = subprocess.run([inner], capture_output=True, text=True, env={**os.environ, **inner_env})

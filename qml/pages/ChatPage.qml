@@ -5,8 +5,8 @@ import "../ChatDraftLogic.js" as DraftLogic
 import "../MarkdownLogic.js" as Markdown
 
 /*
- * Chat with Ada — a live window onto the Ada CLI conversation over the
- * companion-app socket (ada-cli docs/UT_CHAT_PLAN.md).
+ * Chat with Briglia — a live window onto the Briglia CLI conversation over the
+ * companion-app socket (briglia-cli docs/UT_CHAT_PLAN.md).
  *
  * The page is a dumb renderer of server events: history arrives in the
  * `hello` snapshot, live turns as `message` upserts (queued mid-turn
@@ -45,11 +45,11 @@ Item {
     property bool recording: false
     property int recordSeconds: 0
     property int recordMax: 300
-    // tag -> recorded file path, deleted after Ada's ack/nack. Registered
+    // tag -> recorded file path, deleted after Briglia's ack/nack. Registered
     // BEFORE send_voice is invoked, so an instant response can't miss it.
     property var voiceFiles: ({})
     // tag -> {text, attachments, sent, cleared, outcome, error} for sends awaiting
-    // Ada's durable ack. The tag is OURS, generated and registered here
+    // Briglia's durable ack. The tag is OURS, generated and registered here
     // synchronously before Python ever touches the socket (Python maps the
     // wire ref to it pre-transmission), so no ack/nack can arrive before its
     // request is known — the race Codex found in round 2. `sent` records
@@ -59,7 +59,7 @@ Item {
     // text was ACTUALLY cleared for the entry (round 4: clearing is
     // conditional on the composer still matching the snapshot). Content is
     // RESTORED to the composer on refusal or connection loss — an ack means
-    // Ada durably persisted the message, so nothing typed can vanish.
+    // Briglia durably persisted the message, so nothing typed can vanish.
     property var pendingSends: ({})
     property int localSerial: 0
     // True from Send tap until its callback settles (round 4, Codex): the
@@ -326,7 +326,7 @@ Item {
                 if (!ctoken.alive) return;
                 page.sendInFlight = false;
                 if (!r || r.ok !== true) {
-                    page.showBanner(r && r.error ? r.error : i18n.tr("not connected to Ada"), true);
+                    page.showBanner(r && r.error ? r.error : i18n.tr("not connected to Briglia"), true);
                     return;
                 }
                 if (DraftLogic.shouldClearComposerText(composer.text, text))
@@ -360,7 +360,7 @@ Item {
                 delete page.pendingSends[tag];
                 page.sendInFlight = false;
                 page.saveDraftNow();
-                page.showBanner(i18n.tr("Ada didn't accept the message (%1)").arg(pre.error), true);
+                page.showBanner(i18n.tr("Briglia didn't accept the message (%1)").arg(pre.error), true);
                 return;
             }
             transmitSend(tag, text, attachments);
@@ -401,7 +401,7 @@ Item {
                 // Never reached the wire — composer untouched.
                 delete page.pendingSends[tag];
                 page.saveDraftNow();
-                page.showBanner(r && r.error ? r.error : i18n.tr("not connected to Ada"), true);
+                page.showBanner(r && r.error ? r.error : i18n.tr("not connected to Briglia"), true);
                 return;
             }
             entry.sent = true;
@@ -416,7 +416,7 @@ Item {
                 var reason = entry.error;
                 delete page.pendingSends[tag];
                 page.saveDraftNow();
-                page.showBanner(i18n.tr("Ada didn't accept the message (%1)").arg(reason), true);
+                page.showBanner(i18n.tr("Briglia didn't accept the message (%1)").arg(reason), true);
             } else {
                 // normal order: on the wire, awaiting the durable ack
                 clearComposerAfterSend(entry);
@@ -443,7 +443,7 @@ Item {
         pendingAttachments = next;
     }
 
-    // A send Ada refused (nack) comes back to the composer instead of
+    // A send Briglia refused (nack) comes back to the composer instead of
     // disappearing.
     function restoreSend(tag, error) {
         var entry = pendingSends[tag];
@@ -451,7 +451,7 @@ Item {
         if (!entry) return;
         restoreEntryToComposer(entry);
         saveDraftNow();
-        showBanner(i18n.tr("Ada didn't accept the message (%1) — it's back in the composer").arg(error), true);
+        showBanner(i18n.tr("Briglia didn't accept the message (%1) — it's back in the composer").arg(error), true);
     }
 
     // Connection lost with unconfirmed requests in flight: their acks can
@@ -459,7 +459,7 @@ Item {
     // already cleared (`sent`) are restored; ones still awaiting their
     // callback keep the composer as-is and get their refusal parked for the
     // callback. Voice placeholders fail visibly. Honest caveat in the
-    // banner: Ada may still have accepted a send whose ack was lost — the
+    // banner: Briglia may still have accepted a send whose ack was lost — the
     // replayed history after reconnect settles it.
     function failUnconfirmedRequests() {
         var hadSends = false;
@@ -471,7 +471,7 @@ Item {
                 restoreEntryToComposer(entry);
             } else if (entry.outcome === "") {
                 entry.outcome = "refused";
-                entry.error = i18n.tr("connection lost before Ada confirmed");
+                entry.error = i18n.tr("connection lost before Briglia confirmed");
             }
         }
         saveDraftNow();
@@ -479,7 +479,7 @@ Item {
         for (var vtag in voiceFiles) voiceTags.push(vtag);
         for (var j = 0; j < voiceTags.length; j++)
             settleVoiceRef(voiceTags[j],
-                i18n.tr("connection lost before Ada confirmed"));
+                i18n.tr("connection lost before Briglia confirmed"));
         if (hadSends)
             showBanner(i18n.tr("Connection lost — the unconfirmed message is back in the composer (check the chat after reconnecting: it may still have arrived)"), true);
     }
@@ -533,7 +533,7 @@ Item {
             else if (merged.hadPending)
                 // The pending record survived with composer_cleared=false:
                 // the text restores through the composer copy, but the
-                // message may already have reached Ada (round 4, finding 3
+                // message may already have reached Briglia (round 4, finding 3
                 // — a crash between clearing the UI and persisting the
                 // cleared state must not lose the uncertainty warning).
                 page.showBanner(i18n.tr("A message was mid-send when the app last closed — it's in the composer; check the chat first: it may already have been delivered"), true);
@@ -604,7 +604,7 @@ Item {
                     // also deletes the recording), unless a disconnect sweep
                     // already did
                     page.settleVoiceRef(tag,
-                        sr && sr.error ? sr.error : i18n.tr("not connected to Ada"));
+                        sr && sr.error ? sr.error : i18n.tr("not connected to Briglia"));
                 }
             });
         });
@@ -701,7 +701,7 @@ Item {
             anchors { right: parent.right; rightMargin: units.gu(1); verticalCenter: parent.verticalCenter }
             height: units.gu(4)
             color: theme.palette.normal.positive
-            text: i18n.tr("Start Ada")
+            text: i18n.tr("Start Briglia")
             onClicked: {
                 statusStrip.startWorking = true;
                 var token = page.lifeToken;
@@ -733,10 +733,10 @@ Item {
                     // A daemon that IS running but never accepts predates the
                     // chat socket (CLI < 0.1.45) — say so instead of spinning.
                     if (page.app.api && page.app.api.daemon_running === true)
-                        return i18n.tr("Connecting… If this never connects, update Ada CLI from the Dashboard (chat needs v0.1.45+).");
+                        return i18n.tr("Connecting… If this never connects, update Briglia CLI from the Dashboard (chat needs v0.2.0+).");
                     if (page.app.api && page.app.api.daemon_running === false)
-                        return i18n.tr("Ada isn't running on this phone.");
-                    return i18n.tr("Connecting to Ada…");
+                        return i18n.tr("Briglia isn't running on this phone.");
+                    return i18n.tr("Connecting to Briglia…");
                 }
                 if (page.privacyOn)
                     return i18n.tr("Privacy mode is on — messages hidden until /show");
@@ -941,7 +941,7 @@ Item {
                         visible: model.queued
                         textSize: Label.XSmall
                         color: theme.palette.normal.backgroundTertiaryText
-                        text: i18n.tr("queued — Ada is busy, delivered at the next pause")
+                        text: i18n.tr("queued — Briglia is busy, delivered at the next pause")
                     }
 
                     // meta row: message time bottom-left, copy-to-clipboard
@@ -1107,8 +1107,8 @@ Item {
                 autoSize: true
                 maximumLineCount: 6
                 placeholderText: page.connState === "connected"
-                                 ? i18n.tr("Message Ada…")
-                                 : i18n.tr("Waiting for Ada…")
+                                 ? i18n.tr("Message Briglia…")
+                                 : i18n.tr("Waiting for Briglia…")
                 // debounced draft persistence — a killed app keeps the text
                 onTextChanged: draftTimer.restart()
             }

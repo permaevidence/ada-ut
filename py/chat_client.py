@@ -1,7 +1,7 @@
-"""JSON-lines client for Ada CLI's companion-app chat socket.
+"""JSON-lines client for Briglia CLI's companion-app chat socket.
 
-The Ada daemon serves a chat front-end protocol on a Unix domain socket
-(`~/.local/share/ada/app-chat.sock`, ada-cli docs/UT_CHAT_PLAN.md): the app
+The Briglia daemon serves a chat front-end protocol on a Unix domain socket
+(`~/.local/share/briglia/app-chat.sock`, briglia-cli docs/UT_CHAT_PLAN.md): the app
 connects, receives a `hello` with a history snapshot plus live `message` /
 `status` / `error` events, and submits turns with `send` / `voice` / `stop` /
 `command` requests, each correlated by a client `ref`.
@@ -13,7 +13,7 @@ events so the page can render connecting/offline states. Reconnection is
 automatic with capped backoff while the chat is open — the daemon restarting
 (e.g. after /upgrade) just looks like a brief "connecting…" spell.
 
-Nothing here is Ada-state-aware: the module is a dumb pipe by design, so the
+Nothing here is Briglia-state-aware: the module is a dumb pipe by design, so the
 protocol lives in exactly two places (CLI server, QML page) instead of three.
 """
 
@@ -37,15 +37,15 @@ except ImportError:  # unit-testing off-device
 def socket_path():
     """Resolved lazily so tests can retarget via the environment."""
     return os.environ.get(
-        "ADA_CHAT_SOCKET",
-        os.path.expanduser("~/.local/share/ada/app-chat.sock"))
+        "BRIGLIA_CHAT_SOCKET",
+        os.path.expanduser("~/.local/share/briglia/app-chat.sock"))
 
 
 def draft_path():
     """Composer-draft store; resolved lazily for the same test seam reason."""
     return os.environ.get(
-        "ADA_UT_DRAFT_PATH",
-        os.path.expanduser("~/.cache/ada.permaevidence/chat-draft.json"))
+        "BRIGLIA_UT_DRAFT_PATH",
+        os.path.expanduser("~/.cache/briglia.permaevidence/chat-draft.json"))
 
 
 # Seam for tests: replaced to capture the event stream.
@@ -227,7 +227,7 @@ def _send(request, tag=None):
     with _lock:
         sock = _state["sock"]
     if sock is None:
-        return {"ok": False, "error": "not connected to Ada"}
+        return {"ok": False, "error": "not connected to Briglia"}
     request = dict(request)
     ref = "q%d" % next(_ref_counter)
     request["ref"] = ref

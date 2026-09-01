@@ -5,10 +5,10 @@ import Lomiri.Components.Popups 1.3
 
 /*
  * Screen 7 — Always-on (UT_APP_PLAN.md §2.4 #7 + the service slice of
- * Settings). Enables the systemd user service (`ada daemon`, Restart=always,
+ * Settings). Enables the systemd user service (`briglia daemon`, Restart=always,
  * starts at boot via linger) and, on Ubuntu Touch, the kernel wakelock unit
- * that keeps Ada alive with the screen off. Root steps run the scripts
- * ada-cli itself serves (setup-api keepawake_script / linger_command) under
+ * that keeps Briglia alive with the screen off. Root steps run the scripts
+ * briglia-cli itself serves (setup-api keepawake_script / linger_command) under
  * `sudo -S`; the passcode is collected in a dialog, travels only on sudo's
  * stdin, and is never stored (§2.5).
  */
@@ -116,16 +116,16 @@ Page {
             }
             if (result.linger_command) {
                 page.installLingerCommand = result.linger_command;
-                page.succeed(i18n.tr("Service installed. One more step below: allow Ada to start at boot."));
+                page.succeed(i18n.tr("Service installed. One more step below: allow Briglia to start at boot."));
             } else {
-                page.succeed(i18n.tr("Service installed — Ada now runs in the background and starts at boot."));
+                page.succeed(i18n.tr("Service installed — Briglia now runs in the background and starts at boot."));
             }
         });
     }
 
     function grantLinger() {
         working = true; resultIsError = false;
-        askPasscode(i18n.tr("Allows Ada to start at boot without you logging in. Runs: %1").arg(lingerCommand),
+        askPasscode(i18n.tr("Allows Briglia to start at boot without you logging in. Runs: %1").arg(lingerCommand),
                     function(passcode) {
             page.resultText = i18n.tr("Enabling start-at-boot…");
             page.app.pyCall("run_sudo_command", [page.lingerCommand, passcode], function(result) {
@@ -134,7 +134,7 @@ Page {
                     return;
                 }
                 page.installLingerCommand = "";
-                page.succeed(i18n.tr("Done — Ada starts at boot."));
+                page.succeed(i18n.tr("Done — Briglia starts at boot."));
             });
         });
     }
@@ -147,19 +147,19 @@ Page {
                 page.fail(page.app.describeError(result));
                 return;
             }
-            page.succeed(i18n.tr("Service removed. Ada no longer runs in the background."));
+            page.succeed(i18n.tr("Service removed. Briglia no longer runs in the background."));
         });
     }
 
     function restartService() {
         working = true; resultIsError = false;
-        resultText = i18n.tr("Restarting Ada…");
+        resultText = i18n.tr("Restarting Briglia…");
         app.apiService({action: "restart"}, function(result) {
             if (!result || result.ok !== true) {
                 page.fail(page.app.describeError(result));
                 return;
             }
-            page.succeed(i18n.tr("Ada restarted."));
+            page.succeed(i18n.tr("Briglia restarted."));
         });
     }
 
@@ -175,7 +175,7 @@ Page {
             var script = enable ? result.wakelock_install_script
                                 : result.wakelock_uninstall_script;
             if (!script) {
-                page.fail(i18n.tr("The CLI did not return the keep-awake script — update Ada CLI."));
+                page.fail(i18n.tr("The CLI did not return the keep-awake script — update Briglia CLI."));
                 return;
             }
             // Safety gate: refuse a served script that lacks the read-only
@@ -184,11 +184,11 @@ Page {
             // compare: it verifies the property that actually matters and
             // needs no parsing.
             if (script.indexOf("trap 'mount -o remount,ro /") === -1) {
-                page.fail(i18n.tr("This Ada CLI release serves a keep-awake script that could leave the system partition writable if a step fails. Update Ada CLI (button on the Dashboard) and retry."));
+                page.fail(i18n.tr("This Briglia CLI release serves a keep-awake script that could leave the system partition writable if a step fails. Update Briglia CLI (button on the Dashboard) and retry."));
                 return;
             }
             page.askPasscode(enable
-                ? i18n.tr("Installs the keep-awake unit so the phone doesn't suspend Ada when the screen is off. Briefly remounts the system partition read-write.")
+                ? i18n.tr("Installs the keep-awake unit so the phone doesn't suspend Briglia when the screen is off. Briefly remounts the system partition read-write.")
                 : i18n.tr("Removes the keep-awake unit. Briefly remounts the system partition read-write."),
                 function(passcode) {
                     page.resultText = enable ? i18n.tr("Installing keep-awake…")
@@ -199,7 +199,7 @@ Page {
                             return;
                         }
                         page.succeed(enable
-                            ? i18n.tr("Keep-awake active — Ada stays reachable with the screen off.")
+                            ? i18n.tr("Keep-awake active — Briglia stays reachable with the screen off.")
                             : i18n.tr("Keep-awake removed."));
                     });
                 });
@@ -221,7 +221,7 @@ Page {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("Run Ada as an always-on background service: it starts at boot, restarts if it crashes, and answers on Telegram around the clock.")
+                text: i18n.tr("Run Briglia as an always-on background service: it starts at boot, restarts if it crashes, and answers on Telegram around the clock.")
             }
 
             Label {
@@ -307,7 +307,7 @@ Page {
                 visible: page.serviceSupported && page.service
                          && page.service.unit_installed === true
                 enabled: !page.working
-                text: i18n.tr("Restart Ada")
+                text: i18n.tr("Restart Briglia")
                 onClicked: page.restartService()
             }
 
@@ -333,7 +333,7 @@ Page {
                 wrapMode: Text.WordWrap
                 textSize: Label.Small
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("Phones suspend when the screen turns off, which would freeze Ada. This installs a small system unit that holds a kernel wakelock so Ada keeps running. Needs your device passcode.\n\nNote: system updates (OTA) can delete this unit — if Ada stops answering after an update, re-enable it here (`ada doctor` also detects it).")
+                text: i18n.tr("Phones suspend when the screen turns off, which would freeze Briglia. This installs a small system unit that holds a kernel wakelock so Briglia keeps running. Needs your device passcode.\n\nNote: system updates (OTA) can delete this unit — if Briglia stops answering after an update, re-enable it here (`briglia doctor` also detects it).")
             }
             Button {
                 Layout.fillWidth: true

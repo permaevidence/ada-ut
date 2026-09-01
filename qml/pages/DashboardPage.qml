@@ -40,10 +40,10 @@ Item {
             page.loadJournal();
         };
         if (action === "restart")
-            app.apiService({action: "restart"}, function(r) { done(r, i18n.tr("Ada restarted.")); });
+            app.apiService({action: "restart"}, function(r) { done(r, i18n.tr("Briglia restarted.")); });
         else
             app.pyCall("systemctl_user", [action], function(r) {
-                done(r, action === "start" ? i18n.tr("Ada started.") : i18n.tr("Ada stopped."));
+                done(r, action === "start" ? i18n.tr("Briglia started.") : i18n.tr("Briglia stopped."));
             });
     }
 
@@ -63,7 +63,7 @@ Item {
     property var rows: {
         var list = [];
         if (app.detectInfo && app.detectInfo.installed)
-            list.push(row(i18n.tr("Ada CLI"), app.detectInfo.version));
+            list.push(row(i18n.tr("Briglia CLI"), app.detectInfo.version));
         if (api) {
             list.push(row(i18n.tr("Setup"), api.setup.complete
                 ? i18n.tr("complete") : i18n.tr("not finished yet")));
@@ -103,8 +103,14 @@ Item {
                        : i18n.tr("complete"))
                     : i18n.tr("%1 tool(s) missing — install in Settings").arg(tcMissing)));
             }
-            list.push(row(i18n.tr("Ada process"), api.daemon_running === true
+            list.push(row(i18n.tr("Briglia process"), api.daemon_running === true
                 ? i18n.tr("running") : i18n.tr("not running")));
+            // Root-owned keep-awake unit of the previous identity, left in
+            // place by an unprivileged migration (it still keeps the phone
+            // awake): the swap is pending until the passcode step ran.
+            if (app.legacyWakelockPresent)
+                list.push(row(i18n.tr("Keep-awake (old unit)"),
+                    i18n.tr("%1 still installed — swap pending").arg(app.legacy.wakelock_unit_name)));
         } else if (app.detectInfo && app.detectInfo.error) {
             list.push(row(i18n.tr("Problem"), app.detectInfo.error));
         }
@@ -151,7 +157,23 @@ Item {
 
             Button {
                 Layout.fillWidth: true
-                visible: page.api !== null && !(page.api.setup && page.api.setup.complete === true)
+                visible: page.app.migrationNeeded
+                color: theme.palette.normal.positive
+                text: i18n.tr("Migrate Ada data to Briglia")
+                onClicked: page.app.openMigrate()
+            }
+
+            Button {
+                Layout.fillWidth: true
+                visible: !page.app.migrationNeeded && page.app.legacyWakelockPresent
+                text: i18n.tr("Finish keep-awake migration")
+                onClicked: page.app.openMigrate("wakelock")
+            }
+
+            Button {
+                Layout.fillWidth: true
+                visible: page.api !== null && !page.app.migrationNeeded
+                         && !(page.api.setup && page.api.setup.complete === true)
                 color: theme.palette.normal.positive
                 text: i18n.tr("Finish setup")
                 onClicked: page.app.startWizard()
@@ -166,7 +188,7 @@ Item {
 
             Button {
                 Layout.fillWidth: true
-                text: i18n.tr("Update Ada CLI")
+                text: i18n.tr("Update Briglia CLI")
                 onClicked: page.app.openInstall()
             }
 
@@ -236,7 +258,7 @@ Item {
                     wrapMode: Text.WordWrap
                     textSize: Label.Small
                     color: theme.palette.normal.backgroundSecondaryText
-                    text: i18n.tr("💬 Chat needs Ada CLI 0.1.45 or newer — tap “Update Ada CLI” above, then come back.")
+                    text: i18n.tr("💬 Chat needs Briglia CLI 0.2.0 or newer — tap “Update Briglia CLI” above, then come back.")
                 }
             }
 

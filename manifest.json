@@ -1,15 +1,15 @@
 {
-    "name": "ada.permaevidence",
-    "title": "Ada",
-    "version": "0.7.4",
-    "description": "Chat, installer & control panel for Ada CLI",
+    "name": "briglia.permaevidence",
+    "title": "Briglia",
+    "version": "0.8.0",
+    "description": "Chat, installer & control panel for Briglia CLI",
     "architecture": "all",
     "maintainer": "Matteo Ianni <iannimatte@gmail.com>",
     "framework": "ubuntu-touch-24.04-1.x",
     "hooks": {
-        "ada": {
-            "apparmor": "click/ada.apparmor",
-            "desktop": "click/ada.desktop"
+        "briglia": {
+            "apparmor": "click/briglia.apparmor",
+            "desktop": "click/briglia.desktop"
         }
     }
 }

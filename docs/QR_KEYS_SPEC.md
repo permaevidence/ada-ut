@@ -1,12 +1,12 @@
 # QR key transfer — format spec
 
-Typing API keys on a phone keyboard is the worst step of Ada's phone setup.
+Typing API keys on a phone keyboard is the worst step of Briglia's phone setup.
 This spec defines how keys move computer → phone by QR code. Three parties
 implement it and are cross-checked against each other by
 `scripts/qr_selftest.py`:
 
-- **Generator** — the website page `ada-app-psi.vercel.app/qr`
-  (`ada-website/app/qr/qrlib.mjs` + `QrGenerator.tsx`). Fully client-side:
+- **Generator** — the website page `briglia.vercel.app/qr`
+  (`briglia-website/app/qr/qrlib.mjs` + `QrGenerator.tsx`). Fully client-side:
   keys never leave the browser; the page makes no network requests after
   load and works offline.
 - **Reference encoder** — `scripts/qr_ref.py` (test-side only, never
@@ -69,7 +69,7 @@ a typed one. Nothing is persisted by the scan itself.
 ## Camera pipeline
 
 `ScanPage.qml` grabs the viewfinder via `grabToImage` (~1 frame/s, ≤720 px
-wide) to a PNG in `~/.cache/ada.permaevidence/` — PNG because it is the
+wide) to a PNG in `~/.cache/briglia.permaevidence/` — PNG because it is the
 one raster format pure-stdlib Python can decode (zlib). `qr_scan.scan_png`
 deletes the frame file after each read. Decode pipeline: grayscale →
 zxing-style block-adaptive binarization (flat-block black-point

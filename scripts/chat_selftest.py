@@ -29,10 +29,10 @@ ROOT = os.path.dirname(HERE)
 
 # Short socket dir (sockaddr_un cap) + isolated recording dir, both set
 # BEFORE the modules are imported (they freeze paths at import).
-WORK = tempfile.mkdtemp(prefix="ada-ut-chat-", dir="/tmp")
-os.environ["ADA_CHAT_SOCKET"] = os.path.join(WORK, "chat.sock")
-os.environ["ADA_UT_VOICE_DIR"] = os.path.join(WORK, "voice")
-os.environ["ADA_UT_DRAFT_PATH"] = os.path.join(WORK, "drafts", "chat-draft.json")
+WORK = tempfile.mkdtemp(prefix="briglia-ut-chat-", dir="/tmp")
+os.environ["BRIGLIA_CHAT_SOCKET"] = os.path.join(WORK, "chat.sock")
+os.environ["BRIGLIA_UT_VOICE_DIR"] = os.path.join(WORK, "voice")
+os.environ["BRIGLIA_UT_DRAFT_PATH"] = os.path.join(WORK, "drafts", "chat-draft.json")
 
 sys.path.insert(0, os.path.join(ROOT, "py"))
 import chat_client  # noqa: E402
@@ -193,7 +193,7 @@ def clear_events():
 
 def run_client_tests():
     chat_client._emit = capture_emit
-    sock_path = os.environ["ADA_CHAT_SOCKET"]
+    sock_path = os.environ["BRIGLIA_CHAT_SOCKET"]
 
     # connect with no server: state goes connecting → disconnected, and
     # sends are honestly refused
@@ -818,7 +818,7 @@ def run_qml_checks():
           and "connect_chat" not in
               chat_src.split("Component.onCompleted:")[1]
                       .split("Component.onDestruction:")[0])
-    check("qml pin: chat offers Start Ada when the daemon is down",
+    check("qml pin: chat offers Start Briglia when the daemon is down",
           "startButton" in chat_src
           and '"systemctl_user", ["start"]' in chat_src)
     # 4. The composer stayed two rows tall — RowLayout owned the field's

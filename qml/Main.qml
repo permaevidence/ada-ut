@@ -5,7 +5,13 @@ import io.thp.pyotherside 1.4
 import "pages"
 
 /*
- * Ada — chat client, installer & control panel for Ada CLI on Ubuntu Touch.
+ * Briglia — chat client, installer & control panel for Briglia CLI on Ubuntu Touch.
+ *
+ * Identity migration (rename plan §5): a phone still running the CLI as
+ * "ada" is detected read-only (detectInfo.legacy) and, once Briglia CLI is
+ * installed, the CLI's own status block (api.migration) gates everything —
+ * routeInitial() and the post-install path go to MigratePage, where the
+ * user consents before `briglia setup-api migrate` moves anything.
  *
  * Navigation (settled with the owner 2026-08-29): once setup is complete the
  * app is a single shell page with Chat / Dashboard / Settings as header
@@ -17,14 +23,14 @@ import "pages"
  * the PageStack above the shell.
  *
  * Pages live in qml/pages/ and receive {app: root}; all state derives from
- * `ada setup-api status` via root.refresh(), so the app stays stateless —
+ * `briglia setup-api status` via root.refresh(), so the app stays stateless —
  * killing it mid-setup loses nothing (each section persists independently
  * in secrets.json, exactly like the terminal wizard).
  */
 MainView {
     id: root
     objectName: "mainView"
-    applicationName: "ada.permaevidence"
+    applicationName: "briglia.permaevidence"
     automaticOrientation: true
     // Resize content when the on-screen keyboard opens — without this the
     // OSK simply covers the bottom of the page (field-test finding: the
@@ -36,12 +42,27 @@ MainView {
     // ---------------------------------------------------------- state
     property bool pythonReady: false
     property string fatalError: ""
-    property var detectInfo: null      // ada_bridge.detect() result
+    property var detectInfo: null      // briglia_bridge.detect() result
     property bool busy: false
     // Convenience view over the setup-api status payload (null until known).
     readonly property var api: detectInfo && detectInfo.status ? detectInfo.status : null
+    // The CLI's migration gate (schema 2): while an old-identity install is
+    // present, every mutating setup-api verb refuses — so must every flow
+    // here that would call one. Read-only, never inferred from paths.
+    readonly property bool migrationNeeded: api !== null && api.migration
+                                            && api.migration.needed === true
+    // Previous-identity ("ada") artifacts seen by the bridge: an old install
+    // before Briglia exists, or its root-owned keep-awake unit after a
+    // migration (the swap needs the passcode dialog, MigratePage step 2).
+    readonly property var legacy: detectInfo && detectInfo.legacy ? detectInfo.legacy : null
+    readonly property bool legacyInstallPresent: legacy !== null && legacy.present === true
+    readonly property bool legacyWakelockPresent: legacy !== null && legacy.wakelock_unit === true
 
-    // ---- app self-update (the click itself, not the Ada CLI)
+    // The project website (QR generator lives at /qr, the app page at
+    // /ubuntu-touch). One constant, mirrored by briglia_bridge.WEBSITE_BASE.
+    readonly property string websiteBase: "https://briglia.vercel.app"
+
+    // ---- app self-update (the click itself, not the Briglia CLI)
     property var appSettings: ({ auto_update: false })
     property string appVersion: ""
     property string appUpdateNotice: ""
@@ -65,7 +86,7 @@ MainView {
             if (result.ok === true && result.updated === true) {
                 root.appUpdateNoticeError = false;
                 root.appUpdateNotice = i18n.tr(
-                    "App updated to v%1 — close and reopen the app to start using it (Ada itself keeps running).")
+                    "App updated to v%1 — close and reopen the app to start using it (Briglia itself keeps running).")
                     .arg(result.available);
             } else if (result.ok !== true) {
                 root.appUpdateNoticeError = true;
@@ -78,7 +99,7 @@ MainView {
     function refresh(done) {
         if (!pythonReady) { if (done) done(); return; }
         busy = true;
-        py.call("ada_bridge.detect", [], function(result) {
+        py.call("briglia_bridge.detect", [], function(result) {
             busy = false;
             detectInfo = result;
             if (done) done();
@@ -87,7 +108,7 @@ MainView {
 
     // Generic bridge call: cb(result). Never throws into QML. A dotted
     // name ("qr_scan.scan_png") targets that module; bare names go to
-    // ada_bridge.
+    // briglia_bridge.
     //
     // The callback runs inside a try/catch: an async result can land after
     // the page that issued the call was popped, and a destroyed page's
@@ -98,7 +119,7 @@ MainView {
     // backstop so a missed guard degrades to a journal line, not a red box.
     function pyCall(func, args, cb) {
         if (!pythonReady) { if (cb) cb(null); return; }
-        var target = func.indexOf(".") !== -1 ? func : "ada_bridge." + func;
+        var target = func.indexOf(".") !== -1 ? func : "briglia_bridge." + func;
         py.call(target, args, function(result) {
             if (!cb) return;
             try {
@@ -213,10 +234,15 @@ MainView {
         if (fatalError !== "" || detectInfo === null) return;
         if (!detectInfo.installed) return;  // boot page offers Install
         if (api === null) return;           // status unreadable — boot page shows it
+        if (migrationNeeded) { openMigrate(); return; }  // consent first, never the wizard
         if (api.setup && api.setup.complete === true)
             gotoShell();
         else
             startWizard();
+    }
+
+    function openMigrate(mode) {
+        pushPage("MigratePage.qml", {mode: mode || "migrate"});
     }
 
     function openInstall() {
@@ -277,19 +303,19 @@ MainView {
         return true;
     }
 
-    // Chat needs the CLI's app-chat socket (v0.1.45+). The live socket file
-    // outranks the version string: a -dev build serves chat, a stale
-    // pre-upgrade daemon doesn't stop serving it mid-run.
+    // Chat needs the CLI's app-chat socket (every Briglia release, 0.2.0+).
+    // The live socket file outranks the version string: a -dev build serves
+    // chat, a stale pre-upgrade daemon doesn't stop serving it mid-run.
     readonly property bool chatSupported: detectInfo !== null
         && detectInfo.installed === true
         && (detectInfo.chat_socket === true
-            || versionAtLeast(detectInfo.version, "0.1.45"))
+            || versionAtLeast(detectInfo.version, "0.2.0"))
 
     Python {
         id: py
         Component.onCompleted: {
             addImportPath(Qt.resolvedUrl("../py"));
-            importModule("ada_bridge", function() {
+            importModule("briglia_bridge", function() {
                 // qr_scan / chat_client / voice_record are stdlib-only like
                 // the bridge; loading them here keeps the pages free of
                 // import races.
@@ -408,7 +434,7 @@ MainView {
         visible: false
         header: PageHeader {
             id: welcomeHeader
-            title: i18n.tr("Ada")
+            title: i18n.tr("Briglia")
         }
 
         Flickable {
@@ -447,15 +473,19 @@ MainView {
                             // bug surfacing late, not a broken installation —
                             // label it honestly so screenshots aren't misread.
                             return root.pythonReady
-                                ? i18n.tr("App error — details below (Ada itself keeps running).")
+                                ? i18n.tr("App error — details below (Briglia itself keeps running).")
                                 : i18n.tr("Startup problem — details below.");
                         if (!root.pythonReady || root.busy || root.detectInfo === null)
                             return i18n.tr("Checking this device…");
+                        if (!root.detectInfo.installed && root.legacyInstallPresent)
+                            return i18n.tr("An Ada CLI installation was found on this phone. Installing Briglia CLI keeps everything: after the install, the app asks before moving your Ada configuration, memory, watchers and service to Briglia.");
                         if (!root.detectInfo.installed)
-                            return i18n.tr("Ada CLI is not installed yet. One tap downloads and installs it, then a guided setup gets Ada running — no terminal needed.");
+                            return i18n.tr("Briglia CLI is not installed yet. One tap downloads and installs it, then a guided setup gets Briglia running — no terminal needed.");
+                        if (root.migrationNeeded)
+                            return i18n.tr("Briglia CLI %1 is installed. Your Ada data is still waiting to be migrated — nothing runs until you say so.").arg(root.detectInfo.version);
                         if (root.api && root.api.setup && root.api.setup.complete === true)
-                            return i18n.tr("Ada CLI %1 is installed and set up on this phone.").arg(root.detectInfo.version);
-                        return i18n.tr("Ada CLI %1 is installed. Finish the guided setup to get Ada running.").arg(root.detectInfo.version);
+                            return i18n.tr("Briglia CLI %1 is installed and set up on this phone.").arg(root.detectInfo.version);
+                        return i18n.tr("Briglia CLI %1 is installed. Finish the guided setup to get Briglia running.").arg(root.detectInfo.version);
                     }
                 }
 
@@ -487,25 +517,38 @@ MainView {
                     Layout.fillWidth: true
                     visible: root.detectInfo !== null && !root.detectInfo.installed && root.fatalError === ""
                     color: theme.palette.normal.positive
-                    text: i18n.tr("Install Ada CLI")
+                    text: root.legacyInstallPresent
+                          ? i18n.tr("Install Briglia CLI (migrates Ada data)")
+                          : i18n.tr("Install Briglia CLI")
                     onClicked: root.openInstall()
                 }
 
                 Button {
                     Layout.fillWidth: true
                     visible: root.detectInfo !== null && root.detectInfo.installed === true
-                             && root.api !== null && !(root.api.setup && root.api.setup.complete === true)
+                             && root.migrationNeeded
                     color: theme.palette.normal.positive
-                    text: i18n.tr("Set up Ada")
+                    text: i18n.tr("Migrate Ada data to Briglia")
+                    onClicked: root.openMigrate()
+                }
+
+                Button {
+                    Layout.fillWidth: true
+                    visible: root.detectInfo !== null && root.detectInfo.installed === true
+                             && root.api !== null && !root.migrationNeeded
+                             && !(root.api.setup && root.api.setup.complete === true)
+                    color: theme.palette.normal.positive
+                    text: i18n.tr("Set up Briglia")
                     onClicked: root.startWizard()
                 }
 
                 Button {
                     Layout.fillWidth: true
                     visible: root.detectInfo !== null && root.detectInfo.installed === true
-                             && root.api !== null && root.api.setup && root.api.setup.complete === true
+                             && root.api !== null && !root.migrationNeeded
+                             && root.api.setup && root.api.setup.complete === true
                     color: theme.palette.normal.positive
-                    text: i18n.tr("Open Ada")
+                    text: i18n.tr("Open Briglia")
                     onClicked: root.gotoShell()
                 }
 
@@ -525,7 +568,7 @@ MainView {
         visible: false
         header: PageHeader {
             id: installHeader
-            title: i18n.tr("Installing Ada CLI")
+            title: i18n.tr("Installing Briglia CLI")
         }
 
         property int percent: 0
@@ -536,7 +579,7 @@ MainView {
         // Distinct from `failed`: the CLI installed fine but the running
         // daemon could not be confirmed back on the new binary.
         property bool restartFailed: false
-        // The CLI installed fine but a MANUALLY started Ada process is
+        // The CLI installed fine but a MANUALLY started Briglia process is
         // running (no systemd unit to restart): only the user can bounce
         // it, so the app must warn instead of navigating away silently.
         property bool manualRestartNeeded: false
@@ -544,6 +587,10 @@ MainView {
         function finishAfterInstall() {
             installPage.running = false;
             stack.pop();
+            // An old-identity install is present: the CLI refuses every
+            // mutating verb until the explicit migration ran, so the wizard
+            // would only fail — consent page instead (plan §4.2/§5).
+            if (root.migrationNeeded) { root.openMigrate(); return; }
             if (root.api && root.api.setup && root.api.setup.complete === true)
                 root.gotoShell();
             else
@@ -559,7 +606,7 @@ MainView {
         function attemptPostUpdateRestart() {
             installPage.running = true;
             installPage.restartFailed = false;
-            installPage.message = i18n.tr("Restarting Ada to load the update…");
+            installPage.message = i18n.tr("Restarting Briglia to load the update…");
             root.apiService({action: "restart"}, function(r) {
                 root.refresh(function() {
                     var state = root.api && root.api.service && root.api.service.active
@@ -571,8 +618,8 @@ MainView {
                     installPage.running = false;
                     installPage.restartFailed = true;
                     installPage.message = (r && r.ok !== true)
-                        ? i18n.tr("Ada CLI was updated, but restarting the service failed: %1").arg(root.describeError(r))
-                        : i18n.tr("Ada CLI was updated, but the service is '%1' instead of running — the daemon may have crashed on the new version.").arg(state);
+                        ? i18n.tr("Briglia CLI was updated, but restarting the service failed: %1").arg(root.describeError(r))
+                        : i18n.tr("Briglia CLI was updated, but the service is '%1' instead of running — the daemon may have crashed on the new version.").arg(state);
                 });
             });
         }
@@ -584,18 +631,23 @@ MainView {
                 installPage.percent = percent_;
                 installPage.message = message_;
             });
-            py.call("ada_bridge.install", [], function(result) {
+            py.call("briglia_bridge.install", [], function(result) {
                 if (result && result.ok) {
                     root.refresh(function() {
                         var svc = root.api ? root.api.service : null;
-                        if (svc && svc.unit_installed === true && svc.active === "active") {
+                        if (root.migrationNeeded) {
+                            // Fresh Briglia next to an unmigrated old install:
+                            // there is no Briglia service to restart yet, and
+                            // `service restart` would refuse anyway.
+                            installPage.finishAfterInstall();
+                        } else if (svc && svc.unit_installed === true && svc.active === "active") {
                             installPage.attemptPostUpdateRestart();
                         } else if (root.api && root.api.daemon_running === true) {
                             // Running, but not as the active systemd unit ⇒
                             // started by hand; the app cannot restart it.
                             installPage.running = false;
                             installPage.manualRestartNeeded = true;
-                            installPage.message = i18n.tr("Ada CLI was updated, but Ada is running as a manually started process — it keeps executing the OLD version until you restart it yourself: send /restart to Ada on Telegram, or stop it in its terminal (Ctrl+C) and run `ada` again.");
+                            installPage.message = i18n.tr("Briglia CLI was updated, but Briglia is running as a manually started process — it keeps executing the OLD version until you restart it yourself: send /restart to it on Telegram, or stop it in its terminal (Ctrl+C) and run `briglia` again.");
                         } else {
                             installPage.finishAfterInstall();
                         }

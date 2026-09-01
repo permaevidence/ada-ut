@@ -1,70 +1,87 @@
-# Ada for Ubuntu Touch
+# Briglia for Ubuntu Touch
 
-Installer & control panel for [Ada CLI](https://github.com/permaevidence/ada-cli)
-on Ubuntu Touch 24.04 — install, set up, and manage an always-on Ada without
-ever opening the Terminal.
+Chat client, installer & control panel for [Briglia CLI](https://github.com/permaevidence/briglia-cli)
+on Ubuntu Touch 24.04 — install, set up, talk to and manage an always-on
+Briglia without ever opening the Terminal.
 
-The app drives the CLI's machine-readable setup surface (`ada setup-api`,
-JSON over stdin/stdout, schema 1) — it never re-implements validation or
-persistence.
+The app drives the CLI's machine-readable setup surface (`briglia setup-api`,
+JSON over stdin/stdout, **schema 2 exactly**) — it never re-implements
+validation or persistence. Requires **Briglia CLI ≥ v0.2.0** on the device
+(the first release under this name, setup-api schema 2, the `migrate` verb
+and the companion-app chat socket); the installer refuses anything else by
+design, and a phone whose CLI still answers schema 1 is told to update the
+CLI rather than shown a half-working app.
 
-## Status (M6)
+## What it does
 
-- M2: Welcome/detect screen, checksum-verified CDN install with progress.
-- M3: guided setup wizard (provider & model with the catalog served by
-  setup-api, OpenAI/Serper/Jina keys, name, email/calendar provider,
-  Telegram) — every step probes live before saving; and Settings, where
-  every value is editable at any time (masked current values, remove paths,
-  restart-to-apply hints when the daemon is running).
-- M4: Always-on screen (systemd user service + linger + the UT kernel
-  wakelock, root steps run under in-app `sudo -S` with the passcode
-  collected in a dialog and passed on stdin only) and the Dashboard
-  (health rows, start/stop/restart, journal tail, CLI update).
-- Requires Ada CLI ≥ v0.1.43 on the device (the first release with
-  `setup-api`); the installer refuses older releases by design. Keep-awake
-  additionally requires v0.1.44's trap-protected scripts — the app checks
-  the served script's content and refuses to run one that could leave the
-  system partition writable on failure.
-- Terminal-free scope: complete for the None and AgentMail email paths.
-  Google Workspace still needs one `gws auth login` in the Terminal
-  (browser OAuth round-trip) after saving credentials in the app.
-- M5: QR key transfer (`docs/QR_KEYS_SPEC.md`). The website page
-  `ada-app-psi.vercel.app/qr` turns API keys into QR codes entirely in the
-  browser; the app scans them with the camera — per-field Scan buttons and
-  a multi-frame "key bundle" that pre-fills every setup field in one scan.
-  Decoding is pure-stdlib Python (`py/qr_scan.py`, QR v1–10), so the click
-  stays free of compiled code; scanned values still probe live before
-  saving. Selftest: `python3 scripts/qr_selftest.py`.
-- M6: Chat (`qml/pages/ChatPage.qml`).
-  A live chat window onto the local Ada daemon over its companion-app
-  Unix socket (`~/.local/share/ada/app-chat.sock`, JSON lines,
-  same-user-only): bubble history from the server's snapshot + live
-  message/status events, text turns, attachments through a built-in file
-  picker (paths only — files never cross the socket), voice notes
-  recorded with GStreamer/arecord and transcribed by Ada's configured
-  provider, a Stop control, and `/command` pass-through to the shared
-  command set. Requires Ada CLI ≥ v0.1.45 (first release serving the
-  socket); older daemons simply show "connecting…" with a hint to update.
-  Selftest: `python3 scripts/chat_selftest.py` (fake server + fake
-  recorders + QML structural sweep).
+- **Install / update the CLI** from the signed GitHub Releases channel:
+  envelope verified with the pinned CLI key (anti-rollback, expiry,
+  per-version asset location), tarball hashed while streaming, the staged
+  binary validated (`--version`, `bundle-check`, `setup-api status` at
+  schema 2) BEFORE a transactional, journaled, crash-safe swap into
+  `~/.local/bin`.
+- **Guided setup**: provider & model (catalog served by setup-api),
+  OpenAI/Serper/Jina keys, your name, email/calendar provider, Telegram —
+  every step probes live before saving; Settings edits any value later.
+- **Keys via QR** (`docs/QR_KEYS_SPEC.md`): the website's `/qr` page turns
+  API keys into QR codes entirely in the browser; the app scans them with
+  the camera (pure-stdlib decoder, `py/qr_scan.py`).
+- **Always-on**: systemd user service + linger + the Ubuntu Touch kernel
+  keep-awake unit. Root steps run scripts the CLI itself serves, under
+  in-app `sudo -S` with the passcode collected in a dialog and passed on
+  stdin only, never stored; a served script without the read-only-restore
+  trap is refused.
+- **Dashboard**: health rows, start/stop/restart, journal tail, CLI update.
+- **Chat** (`qml/pages/ChatPage.qml`): a live window onto the local daemon
+  over its companion-app Unix socket (`~/.local/share/briglia/app-chat.sock`,
+  JSON lines, same-user-only) — history, live events, text, attachments
+  through a built-in picker (paths only), voice notes, Stop, `/commands`.
+- **Self-update** of the click from this repository's signed releases
+  (manual check; optional auto-update, off by default).
+
+## Moving from Ada (the previous name)
+
+Briglia CLI is the renamed Ada CLI; this app is the renamed Ada companion
+(`ada.permaevidence`). A phone that still runs `ada` is handled explicitly:
+
+1. The boot page detects the old installation (read-only:
+   `briglia_bridge.legacy_status`) and offers **Install Briglia CLI
+   (migrates Ada data)** — the normal signed install.
+2. Once Briglia CLI is installed, the CLI's own status block
+   (`setup-api status` → `migration.needed`) gates everything: the app
+   routes to **MigratePage** instead of the wizard, and nothing runs until
+   you tap **Migrate now**. The move is the CLI's journaled engine
+   (`briglia setup-api migrate`, the verb twin of `briglia migrate`):
+   configuration, memory, watchers, Telegram and the background service
+   move over; the old install is restored if it cannot complete; the old
+   `ada` command stays as an alias. Old AND new directories coexisting is a
+   conflict the page explains and never resolves for you.
+3. Ubuntu Touch only: the keep-awake unit is a root-owned system unit, so an
+   unprivileged migration records it and the app's passcode step swaps it —
+   Briglia's unit installed first, the old one removed after (the phone
+   never gets a chance to suspend in between). Declining is safe; the
+   Dashboard offers the swap again.
+4. Your assistant answers to **Bree** afterwards unless you had given it a
+   custom name (it stays customizable in Settings).
+
+The old app `ada.permaevidence` cannot self-update across package ids: it
+stays installed until you remove it by hand (Settings → Apps), and its
+`~/.cache/ada.permaevidence` (composer drafts only) can be deleted or
+ignored. The new app never touches either.
 
 ## Stack
 
 - QML with Lomiri Components 1.3: `qml/Main.qml` is the shell (state,
   Python bridge, wizard sequencing, launch routing, boot/Install pages);
-  each screen lives in `qml/pages/` and receives `{app: root}`. Since
-  v0.7.0 the home screen is a single shell page with Chat / Dashboard /
-  Settings header sections over three always-alive views (visibility
-  switching, so the chat socket and composer survive tab hops); launch
-  routes straight into the guided setup until it completes, then into
-  Chat. Sub-screens (wizard steps, scanner, viewers, install log) push on
-  the PageStack above the shell.
-- Python backend via PyOtherSide (`py/ada_bridge.py`): process spawning,
-  downloads, setup-api round trips. **On-device verification of PyOtherSide
-  availability is an explicit M2 checkpoint** — the Welcome page shows the
-  import traceback if the module is missing.
+  each screen lives in `qml/pages/` and receives `{app: root}`. The home
+  screen is a single shell page with Chat / Dashboard / Settings header
+  sections over three always-alive views; launch routes into the guided
+  setup until it completes (or into the migration consent page while an
+  old install is pending), then into Chat.
+- Python backend via PyOtherSide (`py/briglia_bridge.py`): process
+  spawning, downloads, setup-api round trips, legacy detection.
 - Unconfined AppArmor template (required: the app writes `~/.local/bin`,
-  runs `systemctl --user`, and spawns `ada`; confinement is inherited by
+  runs `systemctl --user`, and spawns `briglia`; confinement is inherited by
   children, so there is no confined alternative).
 
 ## Build
@@ -73,20 +90,26 @@ No Clickable or Docker needed — the app is architecture-independent:
 
     python3 scripts/build_click.py
 
-writes `build/ada.permaevidence_<version>_all.click`, byte-identical across
-runs (SOURCE_DATE_EPOCH honored). (`clickable.yaml` is included for people
-who prefer the Clickable workflow; both produce the same app.)
+writes `build/briglia.permaevidence_<version>_all.click`, byte-identical
+across runs (SOURCE_DATE_EPOCH honored). `clickable.yaml` is included for
+people who prefer the Clickable workflow; both produce the same app.
 
-Offline test of the install pipeline (staged validation, transactional
-swap + rollback, checksum/extraction guards):
+Tests (all offline, no device):
 
-    python3 scripts/bridge_selftest.py
+    python3 scripts/bridge_selftest.py    # install pipeline, migrate verb, keep-awake swap
+    python3 scripts/identity_selftest.py  # product-identity invariants (see below)
+    python3 scripts/chat_selftest.py      # chat client + voice + QML structural sweep
+    python3 scripts/qr_selftest.py        # QR decoder + generator cross-check
+    python3 scripts/release_selftest.py   # signed-release verifier
+    python3 scripts/publish_selftest.py   # publisher against a fake GitHub API
+    python3 scripts/click_selftest.py     # packaging (LICENSE/manifest in the click)
 
-Packaging regression test (builds the click twice and inspects the ar
-archive: LICENSE + manifest ship in the data area, determinism, no build
-artifacts):
-
-    python3 scripts/click_selftest.py
+`identity_selftest.py` is the rename's repository invariant: one package
+id in one place, the previous identity confined to the bridge's `LEGACY_`
+detection block and the migration copy, the signed-envelope format name
+and QR prefix unchanged, key hexes unchanged with re-derived key IDs, and
+the migration UX actually wired (gate consulted before the wizard, consent
+page reaching the engine, Dashboard offering the pending swap).
 
 ## Install on the phone
 
@@ -94,96 +117,77 @@ Any one of:
 
 1. Copy the .click over and install from the terminal:
 
-       scp build/ada.permaevidence_*.click phablet@<phone>:
-       ssh phablet@<phone> pkcon install-local --allow-untrusted ada.permaevidence_*.click
+       scp build/briglia.permaevidence_*.click phablet@<phone>:
+       ssh phablet@<phone> pkcon install-local --allow-untrusted briglia.permaevidence_*.click
 
-2. Download the .click on the phone (Morph browser / Telegram) and open it —
-   the OpenStore app performs local installation after an "untrusted
-   package" confirmation.
+2. Download the .click on the phone (Morph browser) and open it — the
+   OpenStore app performs local installation after an "untrusted package"
+   confirmation.
 
 3. `clickable install` from a Clickable checkout.
 
-4. Public download page: https://ada-app-psi.vercel.app/app — links the
-   latest signed GitHub Release (the page verifies the release envelope
-   with the pinned app key before it shows a download link).
-
-Once installed, the app updates itself: Settings has a manual "check for
-updates" action and an optional auto-update toggle (off by default).
+4. The website's Ubuntu Touch page links the latest signed GitHub Release
+   (the page verifies the release envelope with the pinned app key before
+   it shows a download link).
 
 ## Signed releases
 
 Everything this app downloads is authenticated before a byte of it is
 trusted (`py/release_verify.py`):
 
-- **Ada CLI installs/updates** read the CLI's signed release envelope from
-  `github.com/permaevidence/ada-cli/releases/latest/download/manifest.sig.json`
-  and verify it with the pinned CLI release key — so a phone first-install
-  is authenticated, not merely TLS-protected.
-- **App self-updates** read this repository's own signed envelope
-  (`releases/latest/download/manifest.sig.json`) and verify it with the
-  pinned app key (`.release-keys/ada-ut-release.pub.pem`).
+- **Briglia CLI installs/updates** read the CLI's signed release envelope
+  from `github.com/permaevidence/briglia-cli/releases/latest/download/manifest.sig.json`
+  and verify it with the pinned CLI release key.
+- **App self-updates** read this repository's own signed envelope and
+  verify it with the pinned app key (`.release-keys/briglia-ut-release.pub.pem`).
 
 Both channels enforce: exact Ed25519 signature over a domain-separated
-input, schema/channel/SemVer/expiry/not-before checks, assets restricted
-to the pinned per-version GitHub location, authenticated size + SHA-256
-while streaming (no Content-Length trust), a hard byte bound, and
-anti-rollback: the sequence must be ≥ the minimum baked into this build
-and ≥ the highest sequence this phone ever accepted for the same channel
-and location (`~/.config/ada-ut/release_trust.json`, locked, monotonic).
+input (format name `ada-release-envelope-v1` — historical, deliberately
+unchanged by the rename: the byte layout did not change, so neither did
+the name), schema/channel/SemVer/expiry/not-before checks, assets
+restricted to the pinned per-version GitHub location, authenticated size +
+SHA-256 while streaming, a hard byte bound, and anti-rollback: the sequence
+must be ≥ the minimum baked into this build and ≥ the highest sequence this
+phone ever accepted for the same channel and location
+(`~/.config/briglia-ut/release_trust.json`, locked, monotonic). Sequences
+CONTINUE across the rename: the first Briglia CLI release is sequence 60
+(v0.2.0), the first Briglia click sequence 2 — so pre-rename envelopes are
+refused by number as well as by channel name. The signing keys did not
+change; their key IDs were re-derived under the new channel names.
 
 Ed25519 on the phone: a system OpenSSL proven against the RFC 8032
 known-answer vectors is used when present; otherwise a dependency-free
-verify-only implementation (also proven against the vectors, and
-cross-checked against OpenSSL in `scripts/release_selftest.py`). Settings
+verify-only implementation (also proven against the vectors). Settings
 shows which one this phone uses. There are deliberately no environment
 overrides for keys, URLs or the verifier.
 
 Publishing (maintainers): `scripts/publish_click.sh` builds the click
-deterministically, checks supersession against the authenticated live
-release, signs with the local app key (`~/.ada-release-keys/`, mode 0600,
-never on argv), verifies the envelope with the committed public key AND
-with the app's own verifier, publishes an immutable GitHub Release (assets,
-envelope last, atomic go-live), re-downloads and byte-compares the public
-state, and only then records the publication. The run holds an
-exclusive cross-process lock (a second publisher is refused), repeats the
-authenticated supersession check immediately before the release is
-created, and binds the tag to the exact reviewed HEAD commit (which must
-already be on `origin/main`) by resolving `refs/tags/v<version>` through
-the Git References API before the draft, before publication and after it
-— a pre-existing tag naming another commit is refused. `--dry-run` stops
-before publishing; `--bootstrap` was accepted once, for the first signed
-release (0.7.4). Every release bumps `APP_RELEASE_SEQUENCE` in
-`py/release_verify.py` together with `manifest.json`'s version. GitHub
-Releases is the only distribution channel; the pre-signature Blob layout
-was retired on 2026-08-31.
+deterministically (filename derived from `manifest.json`), checks
+supersession against the authenticated live release, signs with the local
+app key (`~/.briglia-release-keys/`, mode 0600, never on argv), verifies
+the envelope with the committed public key AND with the app's own
+verifier, publishes an immutable GitHub Release (assets, envelope last,
+atomic go-live), re-downloads and byte-compares the public state, and only
+then records the publication. It holds an exclusive cross-process lock,
+repeats the supersession check right before the release is created, and
+binds the tag to the exact reviewed HEAD commit (which must already be on
+`origin/main`). Every release bumps `APP_RELEASE_SEQUENCE` in
+`py/release_verify.py` together with `manifest.json`'s version.
 
-`scripts/release_watch.py` is the deterministic release-channel watcher
-(both the CLI and app channels): it re-verifies the live envelopes with
-the pinned keys, cross-checks GitHub (recorded release, tag → commit,
-immutability, latest pointer), probes and periodically re-hashes every
-asset, checks the released installer and the website, and alerts over
-Telegram on any mismatch. Its state (the recorded per-channel rollback
-floor) is written durably with a last-known-good copy and automatic
-recovery. `scripts/release_heartbeat.py` is a separate, stdlib-only
-program with its own state and lock that alerts when the checker stops
-completing — it reads only the checker's completion beacon, never its
-code or state, so a broken checker cannot silence the report about it.
-`scripts/install_release_watch.sh` deploys both as launchd agents on a
-Mac atomically (stop → staged snapshot → foreground verification of
-checker then heartbeat → load, with rollback); `scripts/watch_selftest.py`
-is the battery for all three.
-
-Tests: `scripts/release_selftest.py` (verifier), `scripts/bridge_selftest.py`
-(signed install/update paths, rollback, tampering, fault injection) and
-`scripts/publish_selftest.py` (the publisher against a fake GitHub
-Releases API with injected faults).
+`scripts/release_watch.py` / `scripts/release_heartbeat.py` /
+`scripts/install_release_watch.sh` are the deterministic release-channel
+watcher, its independent heartbeat and their launchd installer;
+`scripts/watch_selftest.py` is their battery.
 
 ## Device assumptions
 
 - Ubuntu Touch 24.04 (framework `ubuntu-touch-24.04-1.x`, AppArmor policy
   2404.1). Verify on a device with `ls /usr/share/click/frameworks/`.
-- aarch64 or x86_64 (the bridge maps `platform.machine()` to the ada-cli
-  CDN's `linux-arm64` / `linux-x64` builds).
+- aarch64 or x86_64 (the bridge maps `platform.machine()` to the
+  briglia-cli release's `linux-arm64` / `linux-x64` builds).
+- Google Workspace still needs one `gws auth login` in the Terminal
+  (browser OAuth round-trip) after saving credentials in the app; the None
+  and AgentMail email paths are fully terminal-free.
 
 ## License
 

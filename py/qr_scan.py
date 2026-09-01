@@ -1,4 +1,4 @@
-"""Pure-stdlib QR decoding for the Ada UT app (no zbar/zxing/PIL — the click
+"""Pure-stdlib QR decoding for the Briglia UT app (no zbar/zxing/PIL — the click
 ships no compiled code, so the whole pipeline is Python + zlib).
 
 Pipeline: PNG frame (saved by QML `grabToImage`, which always writes PNG —
@@ -8,7 +8,7 @@ block-adaptive threshold → finder-pattern detection → perspective sampling
 unmask → codeword deinterleave → Reed-Solomon correction → byte-stream parse.
 
 Scope: QR versions 1–10 (21–57 modules), byte/numeric/alphanumeric modes,
-all four EC levels. The Ada key-bundle generator (website /qr page) caps
+all four EC levels. The Briglia key-bundle generator (website /qr page) caps
 itself far below that, so anything it emits decodes here; per-field scans
 of third-party QR codes work within the same limits.
 
@@ -1208,7 +1208,7 @@ def _feed_bundle(text):
     frame = parse_frame(text)
     if frame is None:
         return {"found": True, "kind": "not_bundle",
-                "message": "That QR code is not an Ada key bundle."}
+                "message": "That QR code is not a Briglia key bundle."}
     idx, total, crc, chunk = frame
     if _session["crc"] is not None and _session["crc"] != crc:
         return {"found": True, "kind": "bundle_mismatch",
@@ -1253,8 +1253,8 @@ def frame_path(token=None):
     unique, so an abandoned capture's late saveToFile can never overwrite
     the frame a newer capture is about to decode. Frames whose read was
     lost are purged here by age."""
-    base = os.environ.get("ADA_QR_FRAME_DIR") \
-        or os.path.expanduser("~/.cache/ada.permaevidence")
+    base = os.environ.get("BRIGLIA_QR_FRAME_DIR") \
+        or os.path.expanduser("~/.cache/briglia.permaevidence")
     os.makedirs(base, exist_ok=True)
     try:
         import time
@@ -1309,8 +1309,8 @@ def remove_file(path):
 # frames contain API keys, so persisted copies are strictly opt-in.
 
 def debug_dir():
-    base = os.environ.get("ADA_QR_DEBUG_DIR") \
-        or os.path.expanduser("~/Documents/ada-qr-debug")
+    base = os.environ.get("BRIGLIA_QR_DEBUG_DIR") \
+        or os.path.expanduser("~/Documents/briglia-qr-debug")
     os.makedirs(base, exist_ok=True)
     return base
 
