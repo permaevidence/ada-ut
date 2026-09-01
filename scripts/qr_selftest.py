@@ -24,9 +24,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "py"))
 import qr_ref
 import qr_scan
 
-JS_LIB = os.environ.get(
-    "BRIGLIA_QRLIB_JS",
-    os.path.expanduser("~/Desktop/briglia-website/app/qr/qrlib.mjs"))
+# The website's JS generator port, cross-checked matrix-for-matrix below.
+# Resolution: explicit override → the website checkout next to this repo
+# (drift check against the live page source) → the copy vendored under
+# scripts/fixtures/ (what CI runs, so the cross-check never silently skips).
+_WEBSITE_QRLIB = os.path.expanduser("~/Desktop/briglia-website/app/qr/qrlib.mjs")
+_VENDORED_QRLIB = os.path.join(HERE, "fixtures", "qrlib.mjs")
+JS_LIB = os.environ.get("BRIGLIA_QRLIB_JS") or (
+    _WEBSITE_QRLIB if os.path.isfile(_WEBSITE_QRLIB) else _VENDORED_QRLIB)
 
 CHECKS = [0, 0]  # passed, failed
 
@@ -588,6 +593,10 @@ def _node_matrix(text, level):
 
 
 def test_js_port(tmp):
+    if os.path.abspath(JS_LIB) != os.path.abspath(_VENDORED_QRLIB) and os.path.isfile(JS_LIB):
+        with open(JS_LIB, "rb") as f_live, open(_VENDORED_QRLIB, "rb") as f_vendored:
+            check("vendored scripts/fixtures/qrlib.mjs == the website's generator (no drift)",
+                  f_live.read() == f_vendored.read(), JS_LIB)
     if not (shutil.which("node") and os.path.isfile(JS_LIB)):
         print("skip js-port cross-check (node or %s missing)" % JS_LIB)
         return
