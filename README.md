@@ -20,7 +20,17 @@ CLI rather than shown a half-working app.
   binary validated (`--version`, `bundle-check`, `setup-api status` at
   schema 2) BEFORE a transactional, journaled, crash-safe swap into
   `~/.local/bin`.
-- **Guided setup**: provider & model (catalog served by setup-api),
+- **Quick setup** (default entry, `qml/pages/QuickSetupPage.qml`): type
+  your name, scan the website's `/qr` key bundle once, done. Every scanned
+  key is probed live, everything is saved in ONE `setup-api apply`, then
+  the background service (+ start at boot), the keep-awake unit and the
+  full media toolchain (pandoc and LibreOffice included) are installed —
+  all mandatory on this path, passcode asked once and never stored. An
+  AgentMail key in the bundle selects AgentMail as the email/calendar
+  provider without asking. Rows stay one line each and only expand (with
+  an input field) when something fails. OpenRouter/custom/local providers
+  use the guided setup instead; the scanned keys are kept for it.
+- **Guided setup** (step by step): provider & model (catalog served by setup-api),
   OpenAI/Serper/Jina keys, your name, email/calendar provider, Telegram —
   every step probes live before saving; Settings edits any value later.
 - **Keys via QR** (`docs/QR_KEYS_SPEC.md`): the website's `/qr` page turns

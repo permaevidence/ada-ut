@@ -504,7 +504,14 @@ Item {
                 wrapMode: Text.WordWrap
                 textSize: Label.Small
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("Walk through the setup steps again to fill in anything you skipped. Everything already configured stays as it is — leaving a field blank keeps the saved value.")
+                text: i18n.tr("Quick setup scans a key bundle from the website and checks, saves and installs everything in one go; the guided setup walks through the steps one by one. Everything already configured stays as it is — leaving a field blank keeps the saved value.")
+            }
+            Button {
+                Layout.fillWidth: true
+                enabled: !page.working && !page.toolchainWorking
+                color: theme.palette.normal.positive
+                text: i18n.tr("Quick setup (scan codes)")
+                onClicked: page.app.startSetup()
             }
             Button {
                 Layout.fillWidth: true

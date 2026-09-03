@@ -238,7 +238,7 @@ MainView {
         if (api.setup && api.setup.complete === true)
             gotoShell();
         else
-            startWizard();
+            startSetup();
     }
 
     function openMigrate(mode) {
@@ -248,6 +248,13 @@ MainView {
     function openInstall() {
         stack.push(installPage);
         installPage.start();
+    }
+
+    // Setup entry (owner request 2026-09-03): the quick path first — name +
+    // one bundle scan, everything else automatic (QuickSetupPage.qml); it
+    // offers the step-by-step wizard below as the alternative.
+    function startSetup() {
+        pushPage("QuickSetupPage.qml", {});
     }
 
     // Wizard: screens 3–6 then Always-on; each page calls app.wizardNext().
@@ -539,7 +546,7 @@ MainView {
                              && !(root.api.setup && root.api.setup.complete === true)
                     color: theme.palette.normal.positive
                     text: i18n.tr("Set up Briglia")
-                    onClicked: root.startWizard()
+                    onClicked: root.startSetup()
                 }
 
                 Button {
@@ -594,7 +601,7 @@ MainView {
             if (root.api && root.api.setup && root.api.setup.complete === true)
                 root.gotoShell();
             else
-                root.startWizard();
+                root.startSetup();
         }
 
         // A running daemon keeps executing the OLD binary until restarted —

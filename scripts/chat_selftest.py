@@ -786,10 +786,10 @@ def run_qml_checks():
           and "ChatPage {" in main_src
           and "DashboardPage {" in main_src
           and "SettingsPage {" in main_src)
-    check("qml pin: launch routes — wizard until complete, shell after",
+    check("qml pin: launch routes — setup until complete, shell after",
           "function routeInitial()" in main_src
           and "gotoShell();" in main_src
-          and "startWizard();" in main_src
+          and "startSetup();" in main_src
           and "root.refresh(function() { root.routeInitial(); });" in main_src)
     check("qml pin: routing never yanks an open wizard/install page",
           "if (stack.currentPage !== bootPage) return;" in main_src)

@@ -187,7 +187,7 @@ def main():
     route = main_qml.split("function routeInitial()")[1].split("function openMigrate")[0]
     check("Main.qml: routeInitial consults the migration gate BEFORE setup/wizard routing",
           "if (migrationNeeded) { openMigrate(); return; }" in route
-          and route.index("migrationNeeded") < route.index("startWizard()"))
+          and route.index("migrationNeeded") < route.index("startSetup()"))
     finish = main_qml.split("function finishAfterInstall()")[1].split("}", 1)[0] + main_qml.split("function finishAfterInstall()")[1][:400]
     check("Main.qml: post-install path consults the migration gate before the wizard",
           "if (root.migrationNeeded) { root.openMigrate(); return; }" in finish)
@@ -213,6 +213,34 @@ def main():
           and "legacyWakelockPresent" in dash)
     check("Dashboard: wizard entry hidden while a migration is pending",
           "!page.app.migrationNeeded\n                         && !(page.api.setup" in dash)
+    # ---- 3b. quick setup (owner request 2026-09-03): the fast path is the
+    # default entry, the wizard stays reachable, and the page never
+    # persists anything outside the probe → apply → service surface.
+    quick = read("qml/pages/QuickSetupPage.qml")
+    check("Main.qml: startSetup pushes QuickSetupPage and every setup entry uses it",
+          'pushPage("QuickSetupPage.qml"' in main_qml
+          and "root.startSetup()" in main_qml.split("id: bootPage")[1]
+          and "root.startSetup()" in main_qml.split("function finishAfterInstall()")[1][:800]
+          and 'onClicked: page.app.startSetup()' in dash)
+    check("QuickSetup: bundle scan → probes → ONE apply → mark_complete",
+          'openScan("bundle"' in quick and "apiProbe({kind: kind, api_key" in quick
+          and 'apiProbe({kind: "telegram", token' in quick
+          and "apiApply(req," in quick and "apiApply({mark_complete: true}" in quick)
+    check("QuickSetup: AgentMail auto-selected from the bundle, Telegram needs token + chat id",
+          'req.email_calendar = {provider: "agentmail", api_key: val("agentmail"), install_cli: true}' in quick
+          and 'req.telegram = {token: val("telegram_token"), chat_id: val("telegram_chat_id")}' in quick)
+    check("QuickSetup: service, keep-awake and the full media toolchain are mandatory steps",
+          '{action: "install"}' in quick and '{keepawake_script: true}' in quick
+          and "trap 'mount -o remount,ro /" in quick
+          and "{toolchain: {install: true, pandoc: true, libreoffice: true}}" in quick)
+    check("QuickSetup: passcode via dialog only, never stored, cleared on teardown",
+          "echoMode: TextInput.Password" in quick and 'Component.onDestruction: { passcode = ""' in quick
+          and "set_app_setting" not in quick)
+    check("QuickSetup: step-by-step fallback keeps the scanned keys",
+          "app.acceptBundle(res)" in quick and "app.startWizard()" in quick)
+    check("Settings: both entries offered",
+          'text: i18n.tr("Quick setup (scan codes)")' in read("qml/pages/SettingsPage.qml")
+          and 'onClicked: page.app.startWizard()' in read("qml/pages/SettingsPage.qml"))
     identity = read("qml/pages/IdentityPage.qml")
     check("IdentityPage: persona sentence names Bree as the customizable default",
           'stays \\"Bree\\" (you can change it)' in identity)

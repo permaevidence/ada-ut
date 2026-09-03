@@ -176,7 +176,7 @@ Item {
                          && !(page.api.setup && page.api.setup.complete === true)
                 color: theme.palette.normal.positive
                 text: i18n.tr("Finish setup")
-                onClicked: page.app.startWizard()
+                onClicked: page.app.startSetup()
             }
 
             Button {
