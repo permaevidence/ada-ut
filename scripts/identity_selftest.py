@@ -236,8 +236,30 @@ def main():
     check("QuickSetup: passcode via dialog only, never stored, cleared on teardown",
           "echoMode: TextInput.Password" in quick and 'Component.onDestruction: { passcode = ""' in quick
           and "set_app_setting" not in quick)
-    check("QuickSetup: step-by-step fallback keeps the scanned keys",
-          "app.acceptBundle(res)" in quick and "app.startWizard()" in quick)
+    check("QuickSetup: step-by-step fallback keeps the scanned keys and refreshes status first",
+          "app.acceptBundle(res)" in quick
+          and "app.refresh(function() {\n            page.running = false;\n            page.app.popPage();\n            page.app.startWizard();" in quick)
+    # Codex round 1 (2026-09-03): completion, edited credentials, fail-open
+    # system steps, Telegram destination.
+    check("QuickSetup: completion checks mark_complete, the restart and a refreshed final status",
+          'apiApply({mark_complete: true}, function(result) {\n            if (!result || result.ok !== true)' in quick
+          and "function finalProblems()" in quick and "Restart failed" in quick
+          and quick.index("page.app.gotoShell()") > quick.index("var problems = fresh ? page.finalProblems()"))
+    check("QuickSetup: Retry always re-probes; an edited value drops its verification",
+          "function retry() {\n        if (running) return;\n        runVerify();\n    }" in quick
+          and 'if (rowState(sid) === "verified") setRow(sid, "pending", "")' in quick)
+    check("QuickSetup: service/keep-awake/toolchain are ok only on refreshed evidence, refresh failure never skips",
+          "s.unit_installed !== true || s.active !== \"active\"" in quick
+          and 's.linger === false' in quick
+          and 's.wakelock_active !== "active"' in quick
+          and "these tools are still missing" in quick
+          and "Could not re-read Briglia's status after saving" in quick)
+    check("QuickSetup: Telegram destination verified with getChat and shown",
+          'pyCall("telegram_get_chat", [token, chat]' in quick and 'i18n.tr("bot %1 → %2")' in quick)
+    bridge_src = read("py/briglia_bridge.py")
+    check("bridge: telegram_get_chat refuses non-private chats, never returns the token",
+          'if kind != "private":' in bridge_src and "def telegram_get_chat(token, chat_id):" in bridge_src
+          and '"label": label' in bridge_src and '"token"' not in bridge_src.split("def telegram_get_chat")[1].split("def _progress")[0])
     check("Settings: both entries offered",
           'text: i18n.tr("Quick setup (scan codes)")' in read("qml/pages/SettingsPage.qml")
           and 'onClicked: page.app.startWizard()' in read("qml/pages/SettingsPage.qml"))

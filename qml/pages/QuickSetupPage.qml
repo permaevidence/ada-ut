@@ -116,7 +116,14 @@ Page {
     function val(name) { return has(name) ? values[name].trim() : ""; }
     // Field edits on a failed row rewrite the value in place (no reassign:
     // nothing binds to `values`, and a reassign would rebuild the rows).
-    function setValue(name, text) { values[name] = text; }
+    function setValue(name, text) {
+        if (values[name] === text) return;
+        values[name] = text;
+        // Whatever this value backed is no longer verified.
+        var sid = name === "opencode" ? "main"
+                  : (name.indexOf("telegram_") === 0 ? "telegram" : name);
+        if (rowState(sid) === "verified") setRow(sid, "pending", "");
+    }
 
     // ------------------------------------------------------------ entry
     function startWithBundle(res) {
@@ -138,6 +145,7 @@ Page {
         addRow("service", i18n.tr("Background service"), "");
         if (isUT) addRow("wakelock", i18n.tr("Keep awake with the screen off"), "");
         if (app.api && app.api.toolchain) addRow("toolchain", i18n.tr("Media toolchain"), "");
+        addRow("finish", i18n.tr("Finishing up"), "");
         phase = "run";
         stage = "verify";
         systemCursor = 0;
@@ -151,16 +159,27 @@ Page {
         });
     }
 
+    // Sections may already be committed (and their scanned keys consumed)
+    // by the time the user bails out: refresh first so the wizard sees
+    // them as configured instead of asking for values that are gone.
     function stepByStep() {
-        app.popPage();
-        app.startWizard();
+        if (running) return;
+        running = true;
+        app.refresh(function() {
+            page.running = false;
+            page.app.popPage();
+            page.app.startWizard();
+        });
     }
 
+    // Retry always restarts at the probe stage: a row that failed at
+    // save or system time may have had its value edited meanwhile, and an
+    // edited credential must be re-verified, never trusted from the field.
+    // Rows already "ok"/"skipped" are not touched; runApply sends only
+    // unsaved sections; runSystem skips finished steps.
     function retry() {
         if (running) return;
-        if (stage === "verify") runVerify();
-        else if (stage === "apply") runApply();
-        else runSystem(systemCursor);
+        runVerify();
     }
 
     // ------------------------------------------------------------ 1. verify
@@ -249,8 +268,20 @@ Page {
                     done(false);
                     return;
                 }
-                page.setRow(sid, "verified", probe.bot_username ? "@" + probe.bot_username : "");
-                done(true);
+                // The chat ID decides who may operate Briglia remotely:
+                // resolve it with Telegram (getChat, private chats only) and
+                // show the destination, not just a syntax check.
+                page.app.pyCall("telegram_get_chat", [token, chat], function(dest) {
+                    if (!dest || dest.ok !== true) {
+                        page.setRow(sid, "failed", page.app.describeError(dest));
+                        done(false);
+                        return;
+                    }
+                    page.setRow(sid, "verified", i18n.tr("bot %1 → %2")
+                                .arg(probe.bot_username ? "@" + probe.bot_username : "?")
+                                .arg(dest.label));
+                    done(true);
+                });
             });
             return;
         default:
@@ -331,9 +362,23 @@ Page {
         });
     }
 
+    // A refresh that comes back without a status block must never make
+    // service/keep-awake look "unsupported" (and therefore skipped).
+    function refreshStatus(cb) {
+        app.refresh(function() { cb(page.app.api !== null); });
+    }
+
     function afterSaved() {
         // Refresh so the system steps read the post-save status block.
-        app.refresh(function() { page.runSystem(0); });
+        refreshStatus(function(ok) {
+            if (!ok) {
+                page.setRow("service", "failed", i18n.tr("Could not re-read Briglia's status after saving — tap Retry."));
+                page.running = false;
+                page.statusText = i18n.tr("Fix the marked item and tap Retry.");
+                return;
+            }
+            page.runSystem(0);
+        });
     }
 
     // ------------------------------------------------------------ 3. system
@@ -432,20 +477,36 @@ Page {
             return;
         }
         setRow("service", "checking", i18n.tr("installing…"));
-        var afterInstall = function(lingerCommand) {
-            if (!lingerCommand) {
+        // "ok" only on evidence: the refreshed status block must show the
+        // unit active AND lingering — an install verb can succeed while
+        // warning that the daemon is inactive.
+        var verify = function() {
+            page.refreshStatus(function(fresh) {
+                var s = fresh ? page.service : null;
+                if (!s || s.unit_installed !== true || s.active !== "active") {
+                    page.setRow("service", "failed", i18n.tr("Service installed but not running (state: %1) — check the Dashboard log, then Retry.")
+                                .arg(s && s.active ? s.active : "?"));
+                    done(false);
+                    return;
+                }
+                if (s.linger === false) {
+                    page.setRow("service", "failed", i18n.tr("Service running, but start at boot is not enabled — tap Retry."));
+                    done(false);
+                    return;
+                }
                 page.setRow("service", "ok", i18n.tr("running, starts at boot"));
                 done(true);
-                return;
-            }
+            });
+        };
+        var afterInstall = function(lingerCommand) {
+            if (!lingerCommand) { verify(); return; }
             page.withPasscode(i18n.tr("Lets Briglia start at boot and stay awake with the screen off."),
                 function(pass) {
                     if (pass === null) { page.sudoFailed("service", null); done(false); return; }
                     page.setRow("service", "checking", i18n.tr("enabling start at boot…"));
                     page.app.pyCall("run_sudo_command", [lingerCommand, pass], function(res) {
                         if (!res || res.ok !== true) { page.sudoFailed("service", res); done(false); return; }
-                        page.setRow("service", "ok", i18n.tr("running, starts at boot"));
-                        done(true);
+                        verify();
                     });
                 });
         };
@@ -512,19 +573,32 @@ Page {
                     page.setRow("wakelock", "checking", i18n.tr("installing keep-awake…"));
                     page.app.pyCall("run_privileged_script", [script, pass], function(res) {
                         if (!res || res.ok !== true) { page.sudoFailed("wakelock", res); done(false); return; }
-                        page.setRow("wakelock", "ok", "");
-                        done(true);
+                        page.refreshStatus(function(fresh) {
+                            var s = fresh ? page.service : null;
+                            if (!s || s.wakelock_unit_installed !== true || s.wakelock_active !== "active") {
+                                page.setRow("wakelock", "failed", i18n.tr("Keep-awake unit installed but not active (state: %1) — tap Retry.")
+                                            .arg(s && s.wakelock_active ? s.wakelock_active : "?"));
+                                done(false);
+                                return;
+                            }
+                            page.setRow("wakelock", "ok", "");
+                            done(true);
+                        });
                     });
                 });
         });
     }
 
-    function doToolchain(done) {
+    function missingTools() {
         var tools = app.api && app.api.toolchain && app.api.toolchain.tools ? app.api.toolchain.tools : [];
-        var missing = 0;
+        var missing = [];
         for (var i = 0; i < tools.length; i++)
-            if (tools[i].present !== true) missing++;
-        if (tools.length > 0 && missing === 0) {
+            if (tools[i].present !== true) missing.push(tools[i].name);
+        return missing;
+    }
+
+    function doToolchain(done) {
+        if (missingTools().length === 0) {
             setRow("toolchain", "ok", i18n.tr("already installed"));
             done(true);
             return;
@@ -536,32 +610,94 @@ Page {
                 done(false);
                 return;
             }
-            page.setRow("toolchain", "ok", "");
-            done(true);
+            page.refreshStatus(function(fresh) {
+                var missing = fresh ? page.missingTools() : ["?"];
+                if (missing.length > 0) {
+                    page.setRow("toolchain", "failed", i18n.tr("Install reported success but these tools are still missing: %1 — tap Retry.").arg(missing.join(", ")));
+                    done(false);
+                    return;
+                }
+                page.setRow("toolchain", "ok", "");
+                done(true);
+            });
         });
     }
 
     // ------------------------------------------------------------ 4. finish
+    // Nothing is cleared and Chat does not open until mark_complete, the
+    // restart (when one was due) and a final refreshed status check all
+    // succeeded — a failure lands on the "Finishing up" row with Retry.
+    function finalProblems() {
+        var out = [];
+        var a = app.api;
+        if (a === null) return [i18n.tr("Briglia's status could not be read")];
+        if (!(a.providers && a.providers.active)) out.push(i18n.tr("no active provider"));
+        if (!(a.telegram && a.telegram.configured === true)) out.push(i18n.tr("Telegram not configured"));
+        if (!(a.setup && a.setup.complete === true)) out.push(i18n.tr("setup not marked complete"));
+        var s = page.service;
+        if (rowIndex("service") >= 0 && rowState("service") !== "skipped") {
+            if (!s || s.unit_installed !== true || s.active !== "active")
+                out.push(i18n.tr("background service not running"));
+            else if (s.linger === false)
+                out.push(i18n.tr("start at boot not enabled"));
+        }
+        if (rowIndex("wakelock") >= 0 && rowState("wakelock") !== "skipped"
+                && !(s && s.wakelock_unit_installed === true && s.wakelock_active === "active"))
+            out.push(i18n.tr("keep-awake not active"));
+        if (rowIndex("toolchain") >= 0) {
+            var missing = missingTools();
+            if (missing.length > 0) out.push(i18n.tr("toolchain missing: %1").arg(missing.join(", ")));
+        }
+        return out;
+    }
+
+    function finishFailed(text) {
+        setRow("finish", "failed", text);
+        running = false;
+        statusText = i18n.tr("Fix the marked item and tap Retry.");
+    }
+
     function finishAll() {
+        stage = "finish";
+        running = true;
         statusText = i18n.tr("Finishing…");
+        setRow("finish", "checking", "");
         app.apiApply({mark_complete: true}, function(result) {
-            var restart = function(cb) {
-                // A daemon that was already running keeps the OLD settings
-                // until restarted; a service installed just now started
-                // after the save and needs nothing.
-                if (page.daemonWasRunning && page.service && page.service.unit_installed === true)
-                    page.app.apiService({action: "restart"}, function() { cb(); });
-                else
-                    cb();
+            if (!result || result.ok !== true) {
+                page.finishFailed(i18n.tr("Could not mark the setup complete: %1").arg(page.app.describeError(result)));
+                return;
+            }
+            var settle = function() {
+                page.refreshStatus(function(fresh) {
+                    var problems = fresh ? page.finalProblems() : [i18n.tr("Briglia's status could not be read")];
+                    if (problems.length > 0) {
+                        page.finishFailed(i18n.tr("Not finished: %1").arg(problems.join("; ")));
+                        return;
+                    }
+                    page.setRow("finish", "ok", "");
+                    page.passcode = "";
+                    page.values = ({});
+                    page.app.clearScannedKeys();
+                    page.running = false;
+                    page.phase = "done";
+                    page.app.gotoShell();
+                });
             };
-            restart(function() {
-                page.passcode = "";
-                page.values = ({});
-                page.app.clearScannedKeys();
-                page.running = false;
-                page.phase = "done";
-                page.app.refresh(function() { page.app.gotoShell(); });
-            });
+            // A daemon that was already running keeps the OLD settings until
+            // restarted; a service installed during this run started after
+            // the save and needs nothing.
+            if (page.daemonWasRunning && page.service && page.service.unit_installed === true) {
+                page.setRow("finish", "checking", i18n.tr("restarting Briglia…"));
+                page.app.apiService({action: "restart"}, function(r) {
+                    if (!r || r.ok !== true) {
+                        page.finishFailed(i18n.tr("Restart failed: %1").arg(page.app.describeError(r)));
+                        return;
+                    }
+                    settle();
+                });
+            } else {
+                settle();
+            }
         });
     }
 

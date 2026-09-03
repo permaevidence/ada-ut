@@ -190,6 +190,52 @@ def main():
               listing.get("ok") is True and names == ["note.txt", "sub"],
               str(names))
 
+        # 0b. Quick setup verifies the Telegram DESTINATION, not just the
+        # token: getChat must succeed and be a private chat; the token
+        # never leaks into the returned payload.
+        calls = []
+        def fake_api(token, method, params):
+            calls.append((method, dict(params)))
+            if token == "bad":
+                return {"ok": False, "error_code": 401, "description": "Unauthorized"}
+            cid = params.get("chat_id")
+            if cid == "5551234567":
+                return {"ok": True, "result": {"id": 5551234567, "type": "private",
+                                               "first_name": "Sofia", "last_name": "Bruni",
+                                               "username": "sofiab"}}
+            if cid == "-100777":
+                return {"ok": True, "result": {"id": -100777, "type": "supergroup", "title": "Team"}}
+            return {"ok": False, "error_code": 400, "description": "Bad Request: chat not found"}
+        real_api = briglia_bridge._telegram_api
+        briglia_bridge._telegram_api = fake_api
+        try:
+            r = briglia_bridge.telegram_get_chat("tok", "5551234567")
+            check("getChat: private chat resolves to a human label",
+                  r.get("ok") is True and r.get("label") == "Sofia Bruni (@sofiab)"
+                  and calls[-1] == ("getChat", {"chat_id": "5551234567"}), str(r))
+            r = briglia_bridge.telegram_get_chat("tok", "-100777")
+            check("getChat: a group is refused (private chats only)",
+                  r.get("ok") is False and "not a private chat" in r.get("error", ""), str(r))
+            r = briglia_bridge.telegram_get_chat("tok", "42")
+            check("getChat: unknown chat surfaces Telegram's description",
+                  r.get("ok") is False and "chat not found" in r.get("error", ""), str(r))
+            r = briglia_bridge.telegram_get_chat("bad", "5551234567")
+            check("getChat: bad token surfaces Unauthorized", r.get("ok") is False
+                  and "Unauthorized" in r.get("error", ""), str(r))
+            r = briglia_bridge.telegram_get_chat("", "5551234567")
+            check("getChat: empty inputs refused before any network call",
+                  r.get("ok") is False and len(calls) == 4, str(r))
+            def boom(token, method, params):
+                raise OSError("no network")
+            briglia_bridge._telegram_api = boom
+            r = briglia_bridge.telegram_get_chat("tok", "5551234567")
+            check("getChat: transport failure is an error, never a pass",
+                  r.get("ok") is False and "could not reach Telegram" in r.get("error", ""), str(r))
+            check("getChat: the token never appears in any payload",
+                  all("tok" not in json.dumps(x) for x in [r]), str(r))
+        finally:
+            briglia_bridge._telegram_api = real_api
+
         # 1. Fresh install, happy path.
         publish_release(cdn, "9.9.9", FAKE_BRIGLIA_OK)
         result = briglia_bridge.install()

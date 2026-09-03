@@ -33,6 +33,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -106,6 +107,52 @@ def _fetch(url, timeout=60):
     request = urllib.request.Request(url, headers={"User-Agent": "briglia-ut-app"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
+
+
+def _telegram_api(token, method, params):
+    """One Bot API call. Returns the decoded JSON object; Telegram answers
+    4xx with a JSON body carrying `description`, which is returned rather
+    than raised so the caller can show it. The token appears only in the
+    URL of this in-process request — never in the returned payload."""
+    url = "https://api.telegram.org/bot%s/%s?%s" % (
+        token, method, urllib.parse.urlencode(params))
+    request = urllib.request.Request(url, headers={"User-Agent": "briglia-ut-app"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+    return json.loads(body.decode("utf-8", "replace"))
+
+
+def telegram_get_chat(token, chat_id):
+    """Quick setup (Codex, 2026-09-03): the chat ID decides who may operate
+    Briglia remotely, so it is verified against Telegram (getChat), not
+    just for numeric syntax. Mirrors the CLI's pairing rule: private
+    chats only. Returns {ok, label} or {ok: False, error}."""
+    token = (token or "").strip()
+    chat_id = (chat_id or "").strip()
+    if not token or not chat_id:
+        return {"ok": False, "error": "token and chat ID are both required"}
+    try:
+        payload = _telegram_api(token, "getChat", {"chat_id": chat_id})
+    except Exception as exc:  # network, timeout, malformed body
+        return {"ok": False, "error": "could not reach Telegram: %s" % exc}
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        desc = payload.get("description") if isinstance(payload, dict) else None
+        return {"ok": False, "error": "Telegram rejected the chat ID: %s"
+                % (desc or "unknown error")}
+    chat = payload.get("result") or {}
+    kind = chat.get("type")
+    if kind != "private":
+        return {"ok": False, "error": "chat %s is a %s, not a private chat — Briglia "
+                "pairs only with your own private chat (get the number from "
+                "@userinfobot)" % (chat_id, kind or "unknown type")}
+    name = " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+    label = name or chat_id
+    if chat.get("username"):
+        label += " (@%s)" % chat["username"]
+    return {"ok": True, "label": label, "chat_id": str(chat.get("id", chat_id))}
 
 
 def _progress(stage, percent, message):
