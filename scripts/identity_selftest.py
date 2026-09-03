@@ -272,6 +272,21 @@ def main():
           and 'result["code"] = "chat_not_found"' in read("py/briglia_bridge.py"))
     check("QuickSetup: Telegram destination verified with getChat and shown",
           'pyCall("telegram_get_chat", [token, chat]' in quick and 'i18n.tr("bot %1 → %2")' in quick)
+    # Owner request 2026-09-03 (round 4): a scanned OpenRouter key is probed
+    # and saved as a NON-active alternative provider by its own apply; a
+    # custom-endpoint key is never applied blind and survives the finish
+    # for Settings → Provider.
+    verify_ids = quick.split("readonly property var verifyIds:")[1].split("\n")[0]
+    check("QuickSetup: OpenRouter key → probe with a model → second apply with activate:false",
+          '"openrouter"' in verify_ids and 'addRow("openrouter"' in quick
+          and 'apiProbe({kind: "openrouter", api_key: val("openrouter"), model: openrouterModel()}' in quick
+          and 'apiApply({provider: {profile: "openrouter", activate: false, api_key: val("openrouter")' in quick
+          and 'verifyIds[v] !== "openrouter" && rowState(verifyIds[v]) === "verified"' in quick
+          and quick.count("runExtraProviders()") >= 3)
+    check("QuickSetup: custom-endpoint key is never applied here and is kept for Settings",
+          'addRow("custom"' in quick and 'profile: "custom"' not in quick
+          and 'var keepCustom = page.has("custom");' in quick
+          and quick.index("var keepCustom") < quick.index("page.values = ({});\n                    if (keepCustom)"))
     bridge_src = read("py/briglia_bridge.py")
     check("bridge: telegram_get_chat refuses non-private chats, never returns the token",
           'if kind != "private":' in bridge_src and "def telegram_get_chat(token, chat_id):" in bridge_src

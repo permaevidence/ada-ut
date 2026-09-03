@@ -24,9 +24,13 @@ import Lomiri.Components.Popups 1.3
  * Telegram entries are required (unless the phone already has them);
  * `openai`, `serper`, `jina` and `agentmail` are optional and switch the
  * matching feature on by their mere presence — AgentMail becomes the
- * email/calendar provider without a question. OpenRouter/custom/local
- * providers are step-by-step territory: the scanned keys are kept in
- * app.scannedKeys so "Set up step by step" starts pre-filled.
+ * email/calendar provider without a question. An `openrouter` key is
+ * probed and saved as a NON-active alternative provider (a second apply:
+ * setup-api takes one provider section per call, and OpenCode keeps the
+ * main slot). A `custom` key cannot be saved blind — the server address
+ * and model are unknown — so it stays in app.scannedKeys for Settings →
+ * Provider, where the field pre-fills. Local servers are step-by-step
+ * territory; "Set up step by step" starts pre-filled from the same keys.
  */
 Page {
     id: page
@@ -59,7 +63,16 @@ Page {
     property string passcode: ""
     Component.onDestruction: { passcode = ""; values = ({}); }
 
-    readonly property var verifyIds: ["main", "openai", "serper", "jina", "telegram", "agentmail"]
+    readonly property var verifyIds: ["main", "openai", "serper", "jina", "telegram", "agentmail", "openrouter"]
+    // OpenRouter needs a model to probe and to save; the CLI's own wizard
+    // default (vision-capable) unless setup-api status serves one.
+    function openrouterModel() {
+        return app.api && app.api.openrouter_default_model ? app.api.openrouter_default_model
+                                                           : "google/gemini-3-flash-preview";
+    }
+    function openrouterTextOnly() {
+        return app.api && app.api.openrouter_default_text_only === true;
+    }
     // Rows that do not want the bundle; toolchain/service/wakelock are
     // system steps, identity is saved by the same apply as the keys.
     readonly property var sectionRow: ({provider: "main", openai: "openai", serper: "serper",
@@ -140,6 +153,13 @@ Page {
         if (has("jina")) addRow("jina", i18n.tr("Jina page reading"), "key");
         addRow("telegram", i18n.tr("Telegram"), "telegram");
         if (has("agentmail")) addRow("agentmail", i18n.tr("AgentMail email & calendar"), "key");
+        if (has("openrouter")) addRow("openrouter", i18n.tr("OpenRouter (alternative provider)"), "key");
+        if (has("custom")) {
+            // Never applied from here (no server address, no model): shown
+            // so the user knows where the key went.
+            addRow("custom", i18n.tr("Custom endpoint key"), "");
+            setRow("custom", "ok", i18n.tr("kept for Settings → Provider → Custom endpoint, where you add the server address and model"));
+        }
         addRow("identity", i18n.tr("Your name"), "");
         // The three system rows are MANDATORY on this path: a capability
         // that is missing or unreadable fails its row (pointing to the
@@ -252,6 +272,18 @@ Page {
         case "openai": case "serper": case "jina": case "agentmail":
             probeKey(sid, sid);
             return;
+        case "openrouter":
+            setRow(sid, "checking", "");
+            app.apiProbe({kind: "openrouter", api_key: val("openrouter"), model: openrouterModel()}, function(probe) {
+                if (!probe || probe.ok !== true) {
+                    page.setRow(sid, "failed", i18n.tr("Key check failed: %1").arg(page.app.describeError(probe)));
+                    done(false);
+                    return;
+                }
+                page.setRow(sid, "verified", page.openrouterModel());
+                done(true);
+            });
+            return;
         case "telegram":
             var token = val("telegram_token"), chat = val("telegram_chat_id");
             if (token === "" && chat === "" && telegramConfigured) {
@@ -339,10 +371,12 @@ Page {
             requested.push(section);
             setRow(sectionRow[section], "checking", "");
         }
-        // Rows verified but with nothing left to send (kept current values)
+        // Rows verified but with nothing left to send (kept current values).
+        // OpenRouter is saved by its own apply below, never by this one.
         for (var v = 0; v < verifyIds.length; v++)
-            if (rowState(verifyIds[v]) === "verified") setRow(verifyIds[v], "ok", steps.get(rowIndex(verifyIds[v])).detail);
-        if (requested.length === 0) { afterSaved(); return; }
+            if (verifyIds[v] !== "openrouter" && rowState(verifyIds[v]) === "verified")
+                setRow(verifyIds[v], "ok", steps.get(rowIndex(verifyIds[v])).detail);
+        if (requested.length === 0) { runExtraProviders(); return; }
         app.apiApply(req, function(result) {
             var applied = result && result.applied ? result.applied : [];
             for (var i = 0; i < requested.length; i++) {
@@ -372,6 +406,33 @@ Page {
                 for (var w = 0; w < result.warnings.length; w++)
                     if (result.warnings[w].indexOf("agentmail") === 0 && page.rowIndex("agentmail") >= 0)
                         page.setRow("agentmail", "ok", result.warnings[w]);
+            page.runExtraProviders();
+        });
+    }
+
+    // A scanned OpenRouter key becomes a second, NON-active provider:
+    // setup-api accepts one provider section per apply and the main apply
+    // carried OpenCode, so this is a separate call. activate:false keeps
+    // OpenCode (or whatever was active) as the main provider; OpenRouter
+    // shows up as a choice in Settings → Provider.
+    function runExtraProviders() {
+        if (rowIndex("openrouter") < 0 || rowState("openrouter") === "ok") { afterSaved(); return; }
+        stage = "apply";
+        running = true;
+        statusText = i18n.tr("Saving…");
+        setRow("openrouter", "checking", "");
+        var model = openrouterModel();
+        app.apiApply({provider: {profile: "openrouter", activate: false, api_key: val("openrouter"),
+                                 model: model, effort: "high", text_only: openrouterTextOnly()}},
+                     function(result) {
+            if (!result || result.ok !== true) {
+                page.setRow("openrouter", "failed", i18n.tr("Could not save: %1").arg(page.app.describeError(result)));
+                page.running = false;
+                page.statusText = i18n.tr("Fix the marked item and tap Retry.");
+                return;
+            }
+            page.app.consumeScannedKeys(["openrouter"]);
+            page.setRow("openrouter", "ok", i18n.tr("added as an alternative provider (%1) — switch to it in Settings").arg(model));
             page.afterSaved();
         });
     }
@@ -702,8 +763,17 @@ Page {
                     }
                     page.setRow("finish", "ok", "");
                     page.passcode = "";
+                    // A custom-endpoint key was never saved here (no server
+                    // address, no model): it stays in memory for Settings →
+                    // Provider, where the field pre-fills. Everything else
+                    // was consumed as it was saved; drop any leftovers.
+                    var keepCustom = page.has("custom");
                     page.values = ({});
-                    page.app.clearScannedKeys();
+                    if (keepCustom)
+                        page.app.consumeScannedKeys(["opencode", "openai", "serper", "jina", "telegram_token",
+                                                     "telegram_chat_id", "agentmail", "openrouter"]);
+                    else
+                        page.app.clearScannedKeys();
                     page.running = false;
                     page.phase = "done";
                     page.app.gotoShell();
@@ -745,7 +815,7 @@ Page {
                 visible: page.phase === "intro"
                 wrapMode: Text.WordWrap
                 color: theme.palette.normal.backgroundSecondaryText
-                text: i18n.tr("On your computer, open %1/qr and paste your keys: an OpenCode Go key plus a Telegram bot token and chat ID are required; OpenAI, Serper, Jina and AgentMail are optional and switch on by themselves if present. Then scan the codes with this phone — everything is checked and saved in one go, and Briglia installs its background service, keep-awake and media toolchain. Your device passcode is asked once.")
+                text: i18n.tr("On your computer, open %1/qr and paste your keys: OpenCode Go, OpenAI, Serper, Jina, a Telegram bot token and your chat ID. AgentMail (an email address for Briglia) and OpenRouter (an alternative provider) are optional and switch on by themselves if present. Then scan the codes with this phone — everything is checked and saved in one go, and Briglia installs its background service, keep-awake and media toolchain. Your device passcode is asked once.")
                       .arg(page.app.websiteBase.replace("https://", ""))
             }
             TextField {

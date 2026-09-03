@@ -45,6 +45,16 @@ Known key names (anything else is reported as ignored):
 `opencode`, `openrouter`, `custom`, `openai`, `serper`, `jina`,
 `telegram_token`, `telegram_chat_id`, `agentmail`.
 
+The website generator (briglia.dev/qr) orders them as the phone's quick
+setup consumes them: `opencode`, `openai`, `serper`, `jina`,
+`telegram_token`, `telegram_chat_id` (required for a bundle), then
+`agentmail` (optional: becomes the email/calendar provider by presence),
+then `openrouter` (optional: saved as a non-active alternative provider)
+and `custom` (optional: kept in memory for Settings → Provider, which
+also needs the server address and model). Two or more filled fields
+always produce a bundle, exactly one produces a single-key code — the
+visitor never picks a format.
+
 The payload is split into frames of at most **100 characters** (code
 points), each framed as
 

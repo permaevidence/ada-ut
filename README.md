@@ -29,9 +29,14 @@ CLI rather than shown a half-working app.
   the row and points to the guided setup, which may skip it), passcode
   asked once and never stored. An
   AgentMail key in the bundle selects AgentMail as the email/calendar
-  provider without asking. Rows stay one line each and only expand (with
-  an input field) when something fails. OpenRouter/custom/local providers
-  use the guided setup instead; the scanned keys are kept for it.
+  provider without asking; an OpenRouter key is probed and saved as a
+  NON-active alternative provider (its own `apply`, `activate: false`),
+  so OpenCode stays the main one and OpenRouter appears as a choice in
+  Settings → Provider. Rows stay one line each and only expand (with an
+  input field) when something fails. A custom-endpoint key cannot be
+  saved blind (server address and model unknown): it stays in memory for
+  Settings → Provider, where the field pre-fills. Local servers use the
+  guided setup; the scanned keys are kept for it.
 - **Guided setup** (step by step): provider & model (catalog served by setup-api),
   OpenAI/Serper/Jina keys, your name, email/calendar provider, Telegram —
   every step probes live before saving; Settings edits any value later.
