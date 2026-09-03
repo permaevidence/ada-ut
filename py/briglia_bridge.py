@@ -140,8 +140,11 @@ def telegram_get_chat(token, chat_id):
         return {"ok": False, "error": "could not reach Telegram: %s" % exc}
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         desc = payload.get("description") if isinstance(payload, dict) else None
-        return {"ok": False, "error": "Telegram rejected the chat ID: %s"
-                % (desc or "unknown error")}
+        result = {"ok": False, "error": "Telegram rejected the chat ID: %s"
+                  % (desc or "unknown error")}
+        if desc and "chat not found" in desc.lower():
+            result["code"] = "chat_not_found"   # fresh bot: user must /start it
+        return result
     chat = payload.get("result") or {}
     kind = chat.get("type")
     if kind != "private":

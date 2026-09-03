@@ -217,8 +217,9 @@ def main():
             check("getChat: a group is refused (private chats only)",
                   r.get("ok") is False and "not a private chat" in r.get("error", ""), str(r))
             r = briglia_bridge.telegram_get_chat("tok", "42")
-            check("getChat: unknown chat surfaces Telegram's description",
-                  r.get("ok") is False and "chat not found" in r.get("error", ""), str(r))
+            check("getChat: unknown chat surfaces Telegram's description + the chat_not_found code",
+                  r.get("ok") is False and "chat not found" in r.get("error", "")
+                  and r.get("code") == "chat_not_found", str(r))
             r = briglia_bridge.telegram_get_chat("bad", "5551234567")
             check("getChat: bad token surfaces Unauthorized", r.get("ok") is False
                   and "Unauthorized" in r.get("error", ""), str(r))

@@ -25,7 +25,9 @@ CLI rather than shown a half-working app.
   key is probed live, everything is saved in ONE `setup-api apply`, then
   the background service (+ start at boot), the keep-awake unit and the
   full media toolchain (pandoc and LibreOffice included) are installed —
-  all mandatory on this path, passcode asked once and never stored. An
+  all mandatory on this path (a missing or unreadable capability fails
+  the row and points to the guided setup, which may skip it), passcode
+  asked once and never stored. An
   AgentMail key in the bundle selects AgentMail as the email/calendar
   provider without asking. Rows stay one line each and only expand (with
   an input field) when something fails. OpenRouter/custom/local providers

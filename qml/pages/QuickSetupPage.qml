@@ -102,7 +102,6 @@ Page {
         case "verified": return "✓";
         case "ok": return "✓";
         case "failed": return "✗";
-        case "skipped": return "—";
         default: return "·";
         }
     }
@@ -142,9 +141,12 @@ Page {
         addRow("telegram", i18n.tr("Telegram"), "telegram");
         if (has("agentmail")) addRow("agentmail", i18n.tr("AgentMail email & calendar"), "key");
         addRow("identity", i18n.tr("Your name"), "");
+        // The three system rows are MANDATORY on this path: a capability
+        // that is missing or unreadable fails its row (pointing to the
+        // guided setup, which lets you skip), it is never skipped here.
         addRow("service", i18n.tr("Background service"), "");
-        if (isUT) addRow("wakelock", i18n.tr("Keep awake with the screen off"), "");
-        if (app.api && app.api.toolchain) addRow("toolchain", i18n.tr("Media toolchain"), "");
+        addRow("wakelock", i18n.tr("Keep awake with the screen off"), "");
+        addRow("toolchain", i18n.tr("Media toolchain"), "");
         addRow("finish", i18n.tr("Finishing up"), "");
         phase = "run";
         stage = "verify";
@@ -165,8 +167,14 @@ Page {
     function stepByStep() {
         if (running) return;
         running = true;
-        app.refresh(function() {
+        refreshStatus(function(ok) {
             page.running = false;
+            if (!ok) {
+                // Parts may already be saved: the wizard must not open on
+                // stale data. Stay here; the button is the retry.
+                page.statusText = i18n.tr("Could not re-read Briglia's status — tap \"Set up step by step instead\" again.");
+                return;
+            }
             page.app.popPage();
             page.app.startWizard();
         });
@@ -175,7 +183,7 @@ Page {
     // Retry always restarts at the probe stage: a row that failed at
     // save or system time may have had its value edited meanwhile, and an
     // edited credential must be re-verified, never trusted from the field.
-    // Rows already "ok"/"skipped" are not touched; runApply sends only
+    // Rows already "ok" are not touched; runApply sends only
     // unsaved sections; runSystem skips finished steps.
     function retry() {
         if (running) return;
@@ -273,7 +281,13 @@ Page {
                 // show the destination, not just a syntax check.
                 page.app.pyCall("telegram_get_chat", [token, chat], function(dest) {
                     if (!dest || dest.ok !== true) {
-                        page.setRow(sid, "failed", page.app.describeError(dest));
+                        var why = page.app.describeError(dest);
+                        // A brand-new bot has never seen your chat: Telegram
+                        // answers "chat not found" until you message it.
+                        if (dest && dest.code === "chat_not_found")
+                            why = i18n.tr("Telegram doesn't know this chat yet. Open %1 in Telegram, send /start, then tap Retry.")
+                                  .arg(probe.bot_username ? "@" + probe.bot_username : i18n.tr("your bot"));
+                        page.setRow(sid, "failed", why);
                         done(false);
                         return;
                     }
@@ -391,7 +405,7 @@ Page {
             if (k >= page.systemIds.length) { page.finishAll(); return; }
             page.systemCursor = k;
             var sid = page.systemIds[k];
-            if (page.rowIndex(sid) < 0 || page.rowState(sid) === "ok" || page.rowState(sid) === "skipped") {
+            if (page.rowState(sid) === "ok") {
                 step(k + 1);
                 return;
             }
@@ -472,8 +486,8 @@ Page {
 
     function doService(done) {
         if (!serviceSupported) {
-            setRow("service", "skipped", i18n.tr("not available on this system"));
-            done(true);
+            setRow("service", "failed", i18n.tr("Background service management is not available on this system (Linux/Ubuntu Touch only). Quick setup needs it — use step-by-step setup instead."));
+            done(false);
             return;
         }
         setRow("service", "checking", i18n.tr("installing…"));
@@ -538,8 +552,8 @@ Page {
 
     function doWakelock(done) {
         if (!isUT) {
-            setRow("wakelock", "skipped", "");
-            done(true);
+            setRow("wakelock", "failed", i18n.tr("Keep-awake exists on Ubuntu Touch only. Quick setup needs it — use step-by-step setup instead."));
+            done(false);
             return;
         }
         if (service && service.wakelock_unit_installed === true && service.wakelock_active === "active") {
@@ -548,8 +562,8 @@ Page {
             return;
         }
         if (!(app.api && app.api.wakelock_supported === true)) {
-            setRow("wakelock", "skipped", i18n.tr("not supported by this kernel"));
-            done(true);
+            setRow("wakelock", "failed", i18n.tr("This kernel does not support the keep-awake unit, so Briglia would stop when the screen turns off. Quick setup needs it — use step-by-step setup instead."));
+            done(false);
             return;
         }
         setRow("wakelock", "checking", "");
@@ -589,8 +603,14 @@ Page {
         });
     }
 
+    function toolchainKnown() {
+        return app.api && app.api.toolchain && app.api.toolchain.tools
+               && app.api.toolchain.tools.length > 0 ? true : false;
+    }
+    // Only meaningful when toolchainKnown(): an absent block is NOT "nothing
+    // missing" — callers check toolchainKnown() first.
     function missingTools() {
-        var tools = app.api && app.api.toolchain && app.api.toolchain.tools ? app.api.toolchain.tools : [];
+        var tools = toolchainKnown() ? app.api.toolchain.tools : [];
         var missing = [];
         for (var i = 0; i < tools.length; i++)
             if (tools[i].present !== true) missing.push(tools[i].name);
@@ -598,6 +618,11 @@ Page {
     }
 
     function doToolchain(done) {
+        if (!toolchainKnown()) {
+            setRow("toolchain", "failed", i18n.tr("Briglia CLI did not report its media toolchain status (update Briglia CLI from the Dashboard), tap Retry — or use step-by-step setup instead."));
+            done(false);
+            return;
+        }
         if (missingTools().length === 0) {
             setRow("toolchain", "ok", i18n.tr("already installed"));
             done(true);
@@ -611,7 +636,7 @@ Page {
                 return;
             }
             page.refreshStatus(function(fresh) {
-                var missing = fresh ? page.missingTools() : ["?"];
+                var missing = fresh && page.toolchainKnown() ? page.missingTools() : ["?"];
                 if (missing.length > 0) {
                     page.setRow("toolchain", "failed", i18n.tr("Install reported success but these tools are still missing: %1 — tap Retry.").arg(missing.join(", ")));
                     done(false);
@@ -635,16 +660,15 @@ Page {
         if (!(a.telegram && a.telegram.configured === true)) out.push(i18n.tr("Telegram not configured"));
         if (!(a.setup && a.setup.complete === true)) out.push(i18n.tr("setup not marked complete"));
         var s = page.service;
-        if (rowIndex("service") >= 0 && rowState("service") !== "skipped") {
-            if (!s || s.unit_installed !== true || s.active !== "active")
-                out.push(i18n.tr("background service not running"));
-            else if (s.linger === false)
-                out.push(i18n.tr("start at boot not enabled"));
-        }
-        if (rowIndex("wakelock") >= 0 && rowState("wakelock") !== "skipped"
-                && !(s && s.wakelock_unit_installed === true && s.wakelock_active === "active"))
+        if (!s || s.unit_installed !== true || s.active !== "active")
+            out.push(i18n.tr("background service not running"));
+        else if (s.linger === false)
+            out.push(i18n.tr("start at boot not enabled"));
+        if (!(s && s.wakelock_unit_installed === true && s.wakelock_active === "active"))
             out.push(i18n.tr("keep-awake not active"));
-        if (rowIndex("toolchain") >= 0) {
+        if (!toolchainKnown())
+            out.push(i18n.tr("toolchain status unavailable"));
+        else {
             var missing = missingTools();
             if (missing.length > 0) out.push(i18n.tr("toolchain missing: %1").arg(missing.join(", ")));
         }
@@ -743,6 +767,13 @@ Page {
                 visible: page.phase === "intro"
                 text: i18n.tr("Set up step by step instead")
                 onClicked: page.stepByStep()
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: page.phase === "intro" && page.statusText !== ""
+                wrapMode: Text.WordWrap
+                color: theme.palette.normal.negative
+                text: page.statusText
             }
 
             // ---- run

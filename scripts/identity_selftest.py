@@ -238,7 +238,7 @@ def main():
           and "set_app_setting" not in quick)
     check("QuickSetup: step-by-step fallback keeps the scanned keys and refreshes status first",
           "app.acceptBundle(res)" in quick
-          and "app.refresh(function() {\n            page.running = false;\n            page.app.popPage();\n            page.app.startWizard();" in quick)
+          and "page.app.popPage();\n            page.app.startWizard();" in quick.split("function stepByStep()")[1].split("function retry()")[0])
     # Codex round 1 (2026-09-03): completion, edited credentials, fail-open
     # system steps, Telegram destination.
     check("QuickSetup: completion checks mark_complete, the restart and a refreshed final status",
@@ -254,6 +254,22 @@ def main():
           and 's.wakelock_active !== "active"' in quick
           and "these tools are still missing" in quick
           and "Could not re-read Briglia's status after saving" in quick)
+    # Codex round 2: mandatory means fail closed — no row can be skipped,
+    # the final check exempts nothing, the fallback stays put on a failed
+    # refresh, a fresh bot gets the /start hint.
+    check("QuickSetup: system rows are unconditional and no 'skipped' state exists",
+          'addRow("service"' in quick and 'addRow("wakelock"' in quick and 'addRow("toolchain"' in quick
+          and 'if (isUT) addRow' not in quick and '"skipped"' not in quick)
+    check("QuickSetup: unsupported service/keep-awake/toolchain-status fail the row toward guided setup",
+          quick.count("use step-by-step setup instead") >= 4 and "function toolchainKnown()" in quick
+          and 'i18n.tr("toolchain status unavailable")' in quick)
+    check("QuickSetup: final validation exempts nothing",
+          "rowState(" not in quick.split("function finalProblems()")[1].split("function finishFailed")[0])
+    check("QuickSetup: fallback stays on the page when the refresh fails",
+          "refreshStatus(function(ok) {\n            page.running = false;\n            if (!ok) {" in quick)
+    check("QuickSetup + bridge: fresh-bot hint on chat_not_found",
+          'dest.code === "chat_not_found"' in quick and "send /start, then tap Retry" in quick
+          and 'result["code"] = "chat_not_found"' in read("py/briglia_bridge.py"))
     check("QuickSetup: Telegram destination verified with getChat and shown",
           'pyCall("telegram_get_chat", [token, chat]' in quick and 'i18n.tr("bot %1 → %2")' in quick)
     bridge_src = read("py/briglia_bridge.py")
