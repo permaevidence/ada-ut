@@ -503,8 +503,10 @@ Page {
                     done(false);
                     return;
                 }
-                if (s.linger === false) {
-                    page.setRow("service", "failed", i18n.tr("Service running, but start at boot is not enabled — tap Retry."));
+                // Positive evidence only: an absent/malformed linger field is
+                // not "enabled".
+                if (s.linger !== true) {
+                    page.setRow("service", "failed", i18n.tr("Service running, but start at boot is not confirmed enabled — tap Retry."));
                     done(false);
                     return;
                 }
@@ -524,7 +526,7 @@ Page {
                     });
                 });
         };
-        var lingerFromStatus = service && service.linger === false && service.linger_command
+        var lingerFromStatus = service && service.linger !== true && service.linger_command
                                ? service.linger_command : "";
         if (service && service.unit_installed === true) {
             if (service.active === "active") { afterInstall(lingerFromStatus); return; }
@@ -662,8 +664,8 @@ Page {
         var s = page.service;
         if (!s || s.unit_installed !== true || s.active !== "active")
             out.push(i18n.tr("background service not running"));
-        else if (s.linger === false)
-            out.push(i18n.tr("start at boot not enabled"));
+        else if (s.linger !== true)
+            out.push(i18n.tr("start at boot not confirmed enabled"));
         if (!(s && s.wakelock_unit_installed === true && s.wakelock_active === "active"))
             out.push(i18n.tr("keep-awake not active"));
         if (!toolchainKnown())

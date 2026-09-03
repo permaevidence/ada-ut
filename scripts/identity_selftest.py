@@ -250,7 +250,7 @@ def main():
           and 'if (rowState(sid) === "verified") setRow(sid, "pending", "")' in quick)
     check("QuickSetup: service/keep-awake/toolchain are ok only on refreshed evidence, refresh failure never skips",
           "s.unit_installed !== true || s.active !== \"active\"" in quick
-          and 's.linger === false' in quick
+          and 'linger === false' not in quick and quick.count('s.linger !== true') == 2
           and 's.wakelock_active !== "active"' in quick
           and "these tools are still missing" in quick
           and "Could not re-read Briglia's status after saving" in quick)
