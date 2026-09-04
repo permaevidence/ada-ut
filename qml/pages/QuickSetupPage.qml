@@ -61,7 +61,10 @@ Page {
     property string userName: ""
     // Held only between the first privileged step and the end of the run.
     property string passcode: ""
-    Component.onDestruction: { passcode = ""; values = ({}); }
+    // "" is a VALID passcode (a phone set to swipe unlock has an empty
+    // password and sudo accepts it), so "asked already" is a separate flag.
+    property bool passcodeKnown: false
+    Component.onDestruction: { passcode = ""; passcodeKnown = false; values = ({}); }
 
     readonly property var verifyIds: ["main", "openai", "serper", "jina", "telegram", "agentmail", "openrouter"]
     // OpenRouter needs a model to probe and to save; the CLI's own wizard
@@ -500,7 +503,7 @@ Page {
                 id: passField
                 echoMode: TextInput.Password
                 inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
-                placeholderText: i18n.tr("Passcode")
+                placeholderText: i18n.tr("Passcode (leave empty if the phone has none)")
             }
             Button {
                 color: theme.palette.normal.positive
@@ -528,11 +531,14 @@ Page {
     }
 
     function withPasscode(label, run) {
-        if (passcode !== "") { run(passcode); return; }
+        if (passcodeKnown) { run(passcode); return; }
         pendingLabel = label;
         pendingPrivileged = function(entered) {
-            if (entered === null || entered === "") { run(null); return; }
+            // null = Cancel. "" = Continue with an empty field: the phone has
+            // no passcode (swipe unlock), which sudo accepts — a valid answer.
+            if (entered === null) { run(null); return; }
             page.passcode = entered;
+            page.passcodeKnown = true;
             run(entered);
         };
         PopupUtils.open(passcodeDialog, page);
@@ -540,6 +546,7 @@ Page {
 
     function sudoFailed(sid, res) {
         passcode = "";
+        passcodeKnown = false;
         setRow(sid, "failed", res && res.error
                ? i18n.tr("Passcode rejected or command failed: %1").arg(res.error)
                : i18n.tr("Passcode needed — tap Retry to enter it."));
@@ -763,6 +770,7 @@ Page {
                     }
                     page.setRow("finish", "ok", "");
                     page.passcode = "";
+                    page.passcodeKnown = false;
                     // A custom-endpoint key was never saved here (no server
                     // address, no model): it stays in memory for Settings →
                     // Provider, where the field pre-fills. Everything else

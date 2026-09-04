@@ -383,6 +383,19 @@ def main():
           'page.setRow(row, "ok", steps.get(page.rowIndex(row)).detail);' in quick
           and "page.steps" not in quick)
 
+    # Field-tested 2026-09-04 (Pixel with swipe unlock, app 0.8.3): the
+    # passcode dialog treated an empty field like Cancel, so a phone WITHOUT
+    # a passcode could never pass the service/keep-awake rows. sudo accepts
+    # the empty password such a phone has; "" must therefore be a valid
+    # answer and "already asked" a separate flag.
+    check("QuickSetupPage: an empty passcode is a valid answer (only Cancel/null aborts)",
+          'if (entered === null) { run(null); return; }' in quick
+          and 'entered === ""' not in quick
+          and "property bool passcodeKnown: false" in quick
+          and "if (passcodeKnown) { run(passcode); return; }" in quick
+          and quick.count("passcodeKnown = false") >= 3
+          and "leave empty if the phone has none" in quick)
+
     print("\nidentity selftest: %d passed, %d failed" % (PASSED, FAILED))
     sys.exit(1 if FAILED else 0)
 
