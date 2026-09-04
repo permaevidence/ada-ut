@@ -382,7 +382,7 @@ Page {
             for (var i = 0; i < requested.length; i++) {
                 var row = page.sectionRow[requested[i]];
                 if (applied.indexOf(requested[i]) !== -1) {
-                    page.setRow(row, "ok", page.steps.get(page.rowIndex(row)).detail);
+                    page.setRow(row, "ok", steps.get(page.rowIndex(row)).detail);
                     if (requested[i] === "provider") page.app.consumeScannedKeys(["opencode"]);
                     else if (requested[i] === "email_calendar") page.app.consumeScannedKeys(["agentmail"]);
                     else if (requested[i] === "telegram") page.app.consumeScannedKeys(["telegram_token", "telegram_chat_id"]);

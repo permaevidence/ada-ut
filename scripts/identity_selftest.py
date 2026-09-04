@@ -353,6 +353,36 @@ def main():
     ci = read(".github/workflows/ci.yml")
     check("CI runs the watcher and keys-rename batteries", "scripts/watch_selftest.py" in ci and "scripts/keys_rename_selftest.py" in ci)
 
+    # A root-id-qualified reference to a CHILD id (`page.steps` for a
+    # `ListModel { id: steps }`) resolves to undefined at runtime — ids are
+    # not properties of the root object — and QML only reports it when the
+    # line executes. Field-tested 2026-09-04: `page.steps.get(...)` in the
+    # apply callback threw inside pyCall's try/catch, no row was ever marked
+    # saved and quick setup spun forever (app 0.8.2). Every child id must be
+    # referenced bare; the root may be qualified only with its own
+    # properties, functions and signals (or Page/Item members).
+    id_offenders = []
+    qml_files = [os.path.relpath(os.path.join(d, n), ROOT)
+                 for d, _ds, ns in os.walk(os.path.join(ROOT, "qml")) for n in ns if n.endswith(".qml")]
+    for rel in sorted(qml_files):
+        text = read(rel)
+        root_match = re.search(r"^\s*id:\s*(\w+)", text, re.M)
+        if not root_match:
+            continue
+        root = root_match.group(1)
+        ids = set(re.findall(r"\bid:\s*(\w+)", text)) - {root}
+        declared = (set(re.findall(r"^\s*(?:readonly\s+)?(?:default\s+)?property\s+[\w<>.]+\s+(\w+)", text, re.M))
+                    | set(re.findall(r"^\s*function\s+(\w+)\s*\(", text, re.M))
+                    | set(re.findall(r"^\s*signal\s+(\w+)", text, re.M)))
+        for ln, line in enumerate(text.splitlines(), 1):
+            for name in re.findall(r"\b" + re.escape(root) + r"\.(\w+)", line):
+                if name in ids and name not in declared:
+                    id_offenders.append("%s:%d %s.%s" % (rel, ln, root, name))
+    check("QML: no root-qualified reference to a child id (page.steps class of bug)", not id_offenders, id_offenders)
+    check("QuickSetupPage: apply callback reads the row model bare",
+          'page.setRow(row, "ok", steps.get(page.rowIndex(row)).detail);' in quick
+          and "page.steps" not in quick)
+
     print("\nidentity selftest: %d passed, %d failed" % (PASSED, FAILED))
     sys.exit(1 if FAILED else 0)
 
